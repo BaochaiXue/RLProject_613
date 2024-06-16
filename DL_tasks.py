@@ -3,20 +3,15 @@ from typing import Tuple, List
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Any, Dict
 from torch.utils.data import DataLoader
 import time
 import sys
-from torchvision.models import VisionTransformer
+from torchvision.models import VisionTransformer, resnet50, vgg16, mobilenet_v3_large
 import json
 import random
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from typing import Callable
-from typing import Any
-from typing import Tuple
-from typing import List
-from typing import Dict
 from typing import Any
 
 
@@ -55,18 +50,46 @@ def load_single_test_image(vit_16_using: bool) -> DataLoader:
     return testloader
 
 
+def load_model(model_name: str, model_number: int) -> nn.Module:
+    model_file = f"selected_models/{model_name}/{model_name}_{model_number}.pt"
+    if not os.path.exists(model_file):
+        raise FileNotFoundError(f"Model file {model_file} not found.")
+    model = torch.load(model_file)
+    return model
+
+
+def check_inference_result(
+    model: nn.Module, dataloader: DataLoader, device: torch.device
+) -> int:
+    model.eval()
+    correct: int = 0
+
+    with torch.no_grad():
+        for images, labels in dataloader:
+            images: torch.Tensor
+            labels: torch.Tensor
+            images, labels = images.to(device), labels.to(device)
+            outputs: torch.Tensor = model(images)
+            predicted: torch.Tensor
+            _, predicted = torch.max(outputs.data, 1)
+            correct += (predicted == labels).sum().item()
+
+    return 0 if correct == 1 else 1  # Return 0 if correct, 1 otherwise
+
+
 def main() -> None:
     args: List[str] = sys.argv
-    if len(args) != 4:
-        raise ValueError(
-            "Please provide the model name, pruning factor, epochs, and iterations."
-        )
+    if len(args) != 3:
+        raise ValueError("Please provide the model name and model number.")
+
     model_name: str = args[1]
     model_number: int = int(args[2])
     testloader: DataLoader = load_single_test_image(vit_16_using="vit" in model_name)
-    candidateModel.evaluate(testloader, device)
-    print(candidateModel)
-    candidateModel.save_info_to_json()
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model: nn.Module = load_model(model_name, model_number)
+    model.to(device)
+    result: int = check_inference_result(model, testloader, device)
+    sys.exit(result)
 
 
 if __name__ == "__main__":
