@@ -13,11 +13,21 @@ from typing import Callable
 def get_inference_time_and_accuracy(
     model: torch.nn.Module, dataloader: DataLoader, device: torch.device
 ) -> Tuple[float, float]:
+    """
+    Evaluate the model's inference time and accuracy.
 
+    Args:
+        model (torch.nn.Module): The model to be evaluated.
+        dataloader (DataLoader): The dataloader for test data.
+        device (torch.device): The device to run the model on.
+
+    Returns:
+        Tuple[float, float]: Average inference time and accuracy.
+    """
     model.eval()
     correct: int = 0
     total: int = 0
-    total_time: int = 0.0
+    total_time: float = 0.0
 
     with torch.no_grad():
         for images, labels in dataloader:
@@ -45,7 +55,15 @@ def rename_models_and_evaluate(
     csv_file: str,
     device: torch.device,
 ) -> None:
+    """
+    Rename models and evaluate their performance.
 
+    Args:
+        directory (str): The directory containing the models.
+        models_name (List[str]): The list of model names.
+        csv_file (str): The CSV file to save the results.
+        device (torch.device): The device to run the models on.
+    """
     results: List[List[typing.Any]] = []
 
     for model_name in models_name:
@@ -104,7 +122,7 @@ def rename_models_and_evaluate(
             model_files_with_sizes.sort(key=lambda x: x[1], reverse=True)
 
             # Load the model, measure inference time and accuracy, and rename files
-            for idx, (file, _) in enumerate(model_files_with_sizes, start=1):
+            for idx, (file, size) in enumerate(model_files_with_sizes, start=1):
                 old_path: str = os.path.join(model_directory, file)
                 file_extension: str = os.path.splitext(file)[1]
                 new_name: str = f"{model_name}_{idx}{file_extension}"
@@ -118,7 +136,7 @@ def rename_models_and_evaluate(
                 avg_time, accuracy = get_inference_time_and_accuracy(
                     model, test_dataloader, device
                 )
-                results.append([model_name, idx, new_name, avg_time, accuracy])
+                results.append([model_name, idx, new_name, avg_time, accuracy, size])
 
                 if old_path != new_path:  # Ensure we are not renaming to the same name
                     os.rename(old_path, new_path)
@@ -144,7 +162,8 @@ def rename_models_and_evaluate(
                 "Model Number",
                 "Model File",
                 "Inference Time (s)",
-                "Accuracy (%)",
+                "Accuracy (Percentage)",
+                "Model Size (bytes)",
             ]
         )
         writer.writerows(results)
