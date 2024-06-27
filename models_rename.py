@@ -25,6 +25,7 @@ def get_inference_time_and_accuracy(
         Tuple[float, float]: Average inference time and accuracy.
     """
     model.eval()
+    model.to(device)
     correct: int = 0
     total: int = 0
     total_time: float = 0.0
@@ -36,7 +37,6 @@ def get_inference_time_and_accuracy(
             images, labels = images.to(device), labels.to(device)
             start_time: float = time.time()
             outputs: torch.Tensor = model(images)
-            predicted: torch.Tensor
             _, predicted = torch.max(outputs.data, 1)
             total_time += time.time() - start_time
             total += labels.size(0)
@@ -44,7 +44,6 @@ def get_inference_time_and_accuracy(
 
     average_time: float = total_time / total
     accuracy: float = 100 * correct / total
-    # clearing the cache
     torch.cuda.empty_cache()
     return average_time, accuracy
 
@@ -103,7 +102,6 @@ def rename_models_and_evaluate(
                     f"Directory {model_directory} does not exist or is not a directory."
                 )
 
-            # Get all files in the model directory
             files: List[str] = [
                 f
                 for f in os.listdir(model_directory)
@@ -115,30 +113,26 @@ def rename_models_and_evaluate(
                     f"No files found in directory {model_directory}."
                 )
 
-            # Get file sizes and sort by size from largest to smallest
             model_files_with_sizes: List[Tuple[str, int]] = [
                 (f, os.path.getsize(os.path.join(model_directory, f))) for f in files
             ]
             model_files_with_sizes.sort(key=lambda x: x[1], reverse=True)
 
-            # Load the model, measure inference time and accuracy, and rename files
             for idx, (file, size) in enumerate(model_files_with_sizes, start=1):
                 old_path: str = os.path.join(model_directory, file)
                 file_extension: str = os.path.splitext(file)[1]
                 new_name: str = f"{model_name}_{idx}{file_extension}"
                 new_path: str = os.path.join(model_directory, new_name)
 
-                # Load the model
-                model: torch.nn.Module = torch.load(old_path)
+                model: torch.nn.Module = torch.load(old_path, map_location=device)
                 model.to(device)
 
-                # Get inference time and accuracy
                 avg_time, accuracy = get_inference_time_and_accuracy(
                     model, test_dataloader, device
                 )
                 results.append([model_name, idx, new_name, avg_time, accuracy, size])
 
-                if old_path != new_path:  # Ensure we are not renaming to the same name
+                if old_path != new_path:
                     os.rename(old_path, new_path)
                     print(
                         f"Renamed {file} to {new_name} in directory {model_directory}"
@@ -153,7 +147,6 @@ def rename_models_and_evaluate(
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
 
-    # Save results to CSV file
     with open(csv_file, mode="w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(
