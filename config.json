@@ -1,0 +1,55 @@
+{
+    "num_tasks": 6,
+    "num_variants": 5,
+    "total_time_ms": 10000,
+    "task_list": [
+        {
+            "name": "task1",
+            "model": "vgg16",
+            "address": "selected_models/vgg16",
+            "data": "CIFAR10",
+            "if_periodic": true,
+            "period_ms": 20
+        },
+        {
+            "name": "task2",
+            "model": "resnet50",
+            "address": "selected_models/resnet50",
+            "data": "CIFAR10",
+            "if_periodic": true,
+            "period_ms": 20
+        },
+        {
+            "name": "task3",
+            "model": "vgg16",
+            "address": "selected_models/vgg16",
+            "data": "CIFAR10",
+            "if_periodic": true,
+            "period_ms": 20
+        },
+        {
+            "name": "task4",
+            "model": "vit_b_16",
+            "address": "selected_models/vit_b_16",
+            "data": "CIFAR10",
+            "if_periodic": true,
+            "period_ms": 20
+        },
+        {
+            "name": "task5",
+            "model": "resnet50",
+            "address": "selected_models/resnet50",
+            "data": "CIFAR10",
+            "if_periodic": false,
+            "possion_lambda": 0.1
+        },
+        {
+            "name": "task6",
+            "model": "vit_b_16",
+            "address": "selected_models/vit_b_16",
+            "data": "CIFAR10",
+            "if_periodic": false,
+            "possion_lambda": 0.1
+        }
+    ]
+}
