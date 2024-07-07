@@ -41,7 +41,7 @@
             "address": "selected_models/resnet50",
             "data": "CIFAR10",
             "if_periodic": false,
-            "possion_lambda": 0.1
+            "possion_lambda": 2
         },
         {
             "name": "task6",
@@ -49,7 +49,7 @@
             "address": "selected_models/vit_b_16",
             "data": "CIFAR10",
             "if_periodic": false,
-            "possion_lambda": 0.1
+            "possion_lambda": 2
         }
     ]
 }

@@ -8,6 +8,8 @@ import pandas as pd
 import numpy as np
 import typing
 from typing import Dict, List, Any
+import time
+import GPUtil
 
 
 class DLSchedulingEnv(gym.Env):
@@ -21,48 +23,96 @@ class DLSchedulingEnv(gym.Env):
         # Read model information from CSV file
         self.model_info: pd.DataFrame = pd.read_csv(model_info_file)
 
-        self.setup_gpu_streams()
         self.initialize_parameters()
         self.lock: threading.Lock = threading.Lock()
         self.event: threading.Event = threading.Event()
+        self.task_threads: Dict[str, threading.Thread] = {}
 
-    def setup_gpu_streams(self) -> None:
-        # Set up two backend GPU streams with different priorities
-        self.stream_high_priority: torch.cuda.Stream = torch.cuda.Stream(priority=0)
-        self.stream_low_priority: torch.cuda.Stream = torch.cuda.Stream(priority=1)
+        self.define_spaces()
+        self.task_queues: Dict[int, List[Dict[str, Any]]] = self.generate_task_queues()
+
+        # Start monitoring GPU streams
+        self.monitor_thread: threading.Thread = threading.Thread(
+            target=self.monitor_gpu_streams
+        )
+        self.monitor_thread.daemon = True
+        self.monitor_thread.start()
+
+    def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
+        """
+        Generate task queues based on the task list and the total time.
+        Each task in the queue has a dictionary with the following keys: start_time and deadline.
+        """
+        task_queues: Dict[int, List[Dict[str, Any]]] = {}
+        current_time = 0
+        for task_id, task in enumerate(self.task_list):
+            task_queue = []
+            if task.get("if_periodic", False):
+                period_ms = task["period_ms"]
+                while current_time < self.total_time_ms:
+                    task_queue.append(
+                        {
+                            "start_time": current_time,
+                            "deadline": current_time + period_ms,
+                        }
+                    )
+                    current_time += period_ms
+            else:
+                possion_lambda = task["possion_lambda"]
+                while current_time < self.total_time_ms:
+                    inter_arrival_time = np.random.poisson(possion_lambda)
+                    task_queue.append(
+                        {
+                            "start_time": current_time,
+                            "deadline": current_time + inter_arrival_time,
+                        }
+                    )
+                    current_time += inter_arrival_time
+            task_queues[task_id] = task_queue
+        return task_queues
 
     def initialize_parameters(self) -> None:
-        # Extract necessary parameters from the config
+        """
+        Extract necessary parameters from the config and initialize variant runtimes and accuracies from model information.
+        """
         self.num_tasks: int = self.config["num_tasks"]
         self.num_variants: int = self.config["num_variants"]
+        self.total_time_ms: int = self.config["total_time_ms"]
         self.task_list: List[Dict[str, Any]] = self.config["task_list"]
-        self.gpu_resources: List[float] = self.config["gpu_resources"]
 
-        # Initialize variant runtimes from model information
-        self.variant_runtimes: np.ndarray = self._extract_variant_runtimes()
+        self.variant_runtimes, self.variant_accuracies = self._extract_variant_info()
 
-    def _extract_variant_runtimes(self) -> np.ndarray:
-        # Create a dictionary to store the runtimes based on task and variant
+    def _extract_variant_info(self) -> typing.Tuple[np.ndarray, np.ndarray]:
+        """
+        Extract runtime and accuracy information for each variant from the model information.
+        """
         runtime_dict: Dict[str, List[typing.Optional[float]]] = {}
+        accuracy_dict: Dict[str, List[typing.Optional[float]]] = {}
         for _, row in self.model_info.iterrows():
-            task_name: str = row["Model Name"]
+            model_name: str = row["Model Name"]
             variant_id: int = (
                 int(row["Model Number"]) - 1
             )  # Assuming variant_id starts from 0
             runtime: float = row["Inference Time (s)"]
-            if task_name not in runtime_dict:
-                runtime_dict[task_name] = [None] * self.num_variants
-            runtime_dict[task_name][variant_id] = runtime
+            accuracy: float = row["Accuracy (Percentage)"]
+            if model_name not in runtime_dict:
+                runtime_dict[model_name] = [None] * self.num_variants
+                accuracy_dict[model_name] = [None] * self.num_variants
+            runtime_dict[model_name][variant_id] = runtime
+            accuracy_dict[model_name][variant_id] = accuracy
 
-        # Convert the dictionary to a 2D numpy array for use in observation space
         runtimes: List[List[float]] = []
+        accuracies: List[List[float]] = []
         for task in self.task_list:
-            task_name: str = task["name"]
-            runtimes.append(runtime_dict[task_name])
-        return np.array(runtimes)
+            model_name: str = task["model"]
+            runtimes.append(runtime_dict[model_name])
+            accuracies.append(accuracy_dict[model_name])
+        return np.array(runtimes), np.array(accuracies)
 
     def define_spaces(self) -> None:
-        # Define action space (e.g., choosing the next task and task variant)
+        """
+        Define the action and observation spaces for the environment.
+        """
         self.action_space: spaces.Dict = spaces.Dict(
             {
                 "task_id": spaces.Discrete(self.num_tasks),
@@ -70,9 +120,14 @@ class DLSchedulingEnv(gym.Env):
             }
         )
 
-        # Define observation space (e.g., task deadlines, expected runtimes of each variant, and GPU stream status)
         self.observation_space: spaces.Dict = spaces.Dict(
             {
+                "current_stream": spaces.Discrete(
+                    2
+                ),  # 0 for high priority, 1 for low priority
+                "current_time": spaces.Box(
+                    low=0, high=float("inf"), shape=(1,), dtype=float
+                ),
                 "task_deadlines": spaces.Box(
                     low=0, high=float("inf"), shape=(self.num_tasks,), dtype=float
                 ),
@@ -82,24 +137,32 @@ class DLSchedulingEnv(gym.Env):
                     shape=(self.num_tasks, self.num_variants),
                     dtype=float,
                 ),
+                "variant_accuracies": spaces.Box(
+                    low=0,
+                    high=100,
+                    shape=(self.num_tasks, self.num_variants),
+                    dtype=float,
+                ),
                 "gpu_resources": spaces.Box(low=0, high=1, shape=(2,), dtype=float),
-                "current_stream": spaces.Discrete(
-                    2
-                ),  # 0 for high priority, 1 for low priority
             }
         )
 
     def reset(self) -> Dict[str, Any]:
+        """
+        Reset the environment and return the initial observation.
+        """
         self.current_task_status: List[int] = [0] * self.num_tasks
-        self.available_gpu_resources: List[float] = [
-            1.0,
-            1.0,
-        ]  # Both GPU streams fully available
+        self.task_start_times: Dict[int, float] = {
+            i: None for i in range(self.num_tasks)
+        }
+        self.task_end_times: Dict[int, float] = {i: None for i in range(self.num_tasks)}
 
         initial_observation: Dict[str, Any] = {
-            "task_deadlines": self.config["task_deadlines"],
+            "task_deadlines": [self.config.get("total_time_ms", 10000)]
+            * self.num_tasks,
             "variant_runtimes": self.variant_runtimes,
-            "gpu_resources": self.available_gpu_resources,
+            "variant_accuracies": self.variant_accuracies,
+            "gpu_resources": self.get_gpu_resources(),
             "current_stream": 0,  # Starting with the high priority stream
         }
         return initial_observation
@@ -107,95 +170,246 @@ class DLSchedulingEnv(gym.Env):
     def step(
         self, action: Dict[str, int]
     ) -> typing.Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+        """
+        Execute a step in the environment based on the action provided.
+        """
         task_id: int = action["task_id"]
         variant_id: int = action["variant_id"]
 
-        # Execute the chosen DL task on the appropriate GPU stream
         task: Dict[str, Any] = self.task_list[task_id]
-        variant: Dict[str, Any] = task["variants"][variant_id]
+        variant_runtime = self.variant_runtimes[task_id][variant_id]
+        variant_accuracy = self.variant_accuracies[task_id][variant_id]
 
-        if (
-            variant["priority"] == 0
-            and self.available_gpu_resources[0] >= variant["resource_demand"]
-        ):
-            threading.Thread(
+        gpu_resources = self.get_gpu_resources()
+        if gpu_resources[0] >= variant_runtime:
+            thread = threading.Thread(
                 target=self.execute_task,
-                args=(task, variant, self.stream_high_priority),
-            ).start()
-        elif (
-            variant["priority"] == 1
-            and self.available_gpu_resources[1] >= variant["resource_demand"]
-        ):
-            threading.Thread(
-                target=self.execute_task, args=(task, variant, self.stream_low_priority)
-            ).start()
+                args=(
+                    task,
+                    variant_runtime,
+                    variant_accuracy,
+                    task_id,
+                    variant_id,
+                    self.stream_high_priority,
+                ),
+            )
+            thread.start()
+            self.task_threads[f"{task_id}_{variant_id}"] = thread
+        elif gpu_resources[1] >= variant_runtime:
+            thread = threading.Thread(
+                target=self.execute_task,
+                args=(
+                    task,
+                    variant_runtime,
+                    variant_accuracy,
+                    task_id,
+                    variant_id,
+                    self.stream_low_priority,
+                ),
+            )
+            thread.start()
+            self.task_threads[f"{task_id}_{variant_id}"] = thread
         else:
             # Handle case where resources are insufficient
             reward: float = -1  # Negative reward for invalid action
             done: bool = False
             new_observation: Dict[str, Any] = {
-                "task_deadlines": self.config["task_deadlines"],
+                "task_deadlines": [self.config.get("total_time_ms", 10000)]
+                * self.num_tasks,
                 "variant_runtimes": self.variant_runtimes,
-                "gpu_resources": self.available_gpu_resources,
+                "variant_accuracies": self.variant_accuracies,
+                "gpu_resources": self.get_gpu_resources(),
                 "current_stream": 0,
             }
             return new_observation, reward, done, {}
 
-        # Wait for an event-driven call
-        self.event.wait()
-        self.event.clear()
+        # Check task status and update resources
+        self.check_tasks()
 
         # Update task status and calculate reward
         self.current_task_status[task_id] = 1
-        reward = self.calculate_reward(task)
+        reward = self.calculate_reward(task_id, variant_id)
 
         # Check if episode has ended
         done = all(status == 1 for status in self.current_task_status)
 
         # Prepare new observation
         new_observation = {
-            "task_deadlines": self.config["task_deadlines"],
+            "task_deadlines": [self.config.get("total_time_ms", 10000)]
+            * self.num_tasks,
             "variant_runtimes": self.variant_runtimes,
-            "gpu_resources": self.available_gpu_resources,
+            "variant_accuracies": self.variant_accuracies,
+            "gpu_resources": self.get_gpu_resources(),
             "current_stream": 0,
         }
         return new_observation, reward, done, {}
 
     def execute_task(
-        self, task: Dict[str, Any], variant: Dict[str, Any], stream: torch.cuda.Stream
+        self,
+        task: Dict[str, Any],
+        variant_runtime: float,
+        variant_accuracy: float,
+        task_id: int,
+        variant_id: int,
+        stream: torch.cuda.Stream,
     ) -> None:
+        """
+        Execute the specified task variant on the given GPU stream.
+        """
         command: List[str] = [
             "python",
-            "run_task.py",
-            task["name"],
-            variant["name"],
+            task["address"],
+            task["data"],
             str(stream.priority),
         ]
         process: subprocess.Popen = subprocess.Popen(command)
+        self.task_start_times[task_id] = time.time()
+        self.monitor_task(process, variant_runtime, variant_accuracy, task_id, stream)
+
+    def monitor_task(
+        self,
+        process: subprocess.Popen,
+        variant_runtime: float,
+        variant_accuracy: float,
+        task_id: int,
+        stream: torch.cuda.Stream,
+    ) -> None:
+        """
+        Monitor the task execution and update resources upon completion.
+        """
+        thread = threading.Thread(
+            target=self._monitor_task,
+            args=(process, variant_runtime, variant_accuracy, task_id, stream),
+        )
+        thread.start()
+
+    def _monitor_task(
+        self,
+        process: subprocess.Popen,
+        variant_runtime: float,
+        variant_accuracy: float,
+        task_id: int,
+        stream: torch.cuda.Stream,
+    ) -> None:
+        """
+        Wait for the task to complete and update the GPU resources.
+        """
         process.wait()  # Wait for the subprocess to complete
-
         with self.lock:
-            self.update_gpu_resources(variant, stream)
-
+            self.update_gpu_resources(variant_runtime, stream)
+        self.task_end_times[task_id] = time.time()
         self.event.set()
 
-    def update_gpu_resources(
-        self, variant: Dict[str, Any], stream: torch.cuda.Stream
-    ) -> None:
-        if stream == self.stream_high_priority:
-            self.available_gpu_resources[0] += variant["resource_demand"]
-        else:
-            self.available_gpu_resources[1] += variant["resource_demand"]
+    def get_gpu_resources(self) -> List[float]:
+        """
+        Get the current GPU load and memory usage.
+        """
+        gpus = GPUtil.getGPUs()
+        if not gpus:
+            return [1.0, 1.0]  # Default to fully available if no GPUs are found
+        loads = [gpu.load for gpu in gpus[:2]]  # Get load for the first two GPUs
+        return [1.0 - load for load in loads]
 
-    def calculate_reward(self, task: Dict[str, Any]) -> float:
-        # Placeholder reward calculation
-        return task["reward"]
+    def update_gpu_resources(
+        self, variant_runtime: float, stream: torch.cuda.Stream
+    ) -> None:
+        """
+        Update the GPU resources after a task completes.
+        """
+        # Implementation details for updating GPU resources can be added here
+
+    def calculate_reward(self, task_id: int, variant_id: int) -> float:
+        """
+        Calculate the reward based on task completion, GPU utilization, and accuracy.
+        """
+        deadline = (
+            self.config.get("total_time_ms", 10000) / 1000.0
+        )  # Convert to seconds
+        end_time = self.task_end_times[task_id]
+        start_time = self.task_start_times[task_id]
+        completion_time = end_time - start_time if end_time and start_time else 0
+        ddl_miss_penalty = -10 if completion_time > deadline else 0
+
+        gpu_utilization = 1.0 - np.mean(self.get_gpu_resources())
+        utilization_reward = gpu_utilization * 10
+
+        accuracy = self.variant_accuracies[task_id][variant_id]
+        accuracy_reward = accuracy / 10  # Scale the accuracy to a smaller value
+
+        return utilization_reward + accuracy_reward + ddl_miss_penalty
 
     def render(self, mode: str = "human") -> None:
+        """
+        Render the current state of the environment.
+        """
         print(f"Task Status: {self.current_task_status}")
-        print(f"GPU Resources: {self.available_gpu_resources}")
+        print(f"GPU Resources: {self.get_gpu_resources()}")
 
     def close(self) -> None:
-        # Clean up GPU resources
+        """
+        Clean up the environment and GPU resources.
+        """
         del self.stream_high_priority
         del self.stream_low_priority
+
+    def check_tasks(self) -> None:
+        """
+        Check the status of all tasks and update the event accordingly.
+        """
+        for key, thread in list(self.task_threads.items()):
+            if not thread.is_alive():
+                del self.task_threads[key]
+                self.event.set()
+
+    def monitor_gpu_streams(self) -> None:
+        """
+        Continuously monitor the GPU streams for task completion.
+        """
+        while True:
+            self.check_tasks()
+            time.sleep(0.1)  # Check every 0.1 seconds
+
+
+# Example usage:
+env = DLSchedulingEnv(
+    config_file="config.json", model_info_file="model_information.csv"
+)
+
+# Reset environment to get the initial observation
+observation = env.reset()
+
+
+# Simple agent that takes random actions
+class SimpleContinuousAgent:
+    def __init__(
+        self, action_space: spaces.Dict, observation_space: spaces.Dict
+    ) -> None:
+        self.action_space = action_space
+        self.observation_space = observation_space
+
+    def select_action(self, observation: Dict[str, Any]) -> Dict[str, int]:
+        """
+        Select a random action from the action space.
+        """
+        task_id = np.random.randint(self.action_space["task_id"].n)
+        variant_id = np.random.randint(self.action_space["variant_id"].n)
+        return {"task_id": task_id, "variant_id": variant_id}
+
+
+agent = SimpleContinuousAgent(env.action_space, env.observation_space)
+
+# Continuous interaction loop
+for _ in range(100):  # Run for 100 iterations as an example
+    action = agent.select_action(observation)
+    observation, reward, done, info = env.step(action)
+
+    print(f"Action: {action}")
+    print(f"Observation: {observation}")
+    print(f"Reward: {reward}")
+    print(f"Done: {done}")
+
+    if done:
+        print("Episode finished")
+        break
+
+env.close()
