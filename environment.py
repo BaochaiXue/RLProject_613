@@ -115,22 +115,30 @@ class DLSchedulingEnv(gym.Env):
         """
         self.action_space: spaces.Dict = spaces.Dict(
             {
-                "task_id": spaces.Discrete(self.num_tasks),
-                "variant_id": spaces.Discrete(self.num_variants),
+                "task1_id": spaces.Discrete(
+                    self.num_tasks + 1
+                ),  # including the empty action
+                "variant1_id": spaces.Discrete(self.num_variants),
+                "task2_id": spaces.Discrete(
+                    self.num_tasks + 1
+                ),  # including the empty action
+                "variant2_id": spaces.Discrete(self.num_variants),
             }
         )
 
         self.observation_space: spaces.Dict = spaces.Dict(
             {
-                "current_stream": spaces.Discrete(
+                "current_streams_status": spaces.MultiBinary(
                     2
-                ),  # 0 for high priority, 1 for low priority
+                ),  # we have 2 streams, true if busy, false if idle
                 "current_time": spaces.Box(
                     low=0, high=float("inf"), shape=(1,), dtype=float
                 ),
                 "task_deadlines": spaces.Box(
                     low=0, high=float("inf"), shape=(self.num_tasks,), dtype=float
                 ),
+                "task_if_arrived": spaces.Discrete(self.num_tasks),
+                "task_if_periodic": spaces.Discrete(self.num_tasks),
                 "variant_runtimes": spaces.Box(
                     low=0,
                     high=float("inf"),
