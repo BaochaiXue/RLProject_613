@@ -44,11 +44,11 @@ class DLSchedulingEnv(gym.Env):
         Each task in the queue has a dictionary with the following keys: start_time and deadline.
         """
         task_queues: Dict[int, List[Dict[str, Any]]] = {}
-        current_time = 0
+        current_time: int = 0
         for task_id, task in enumerate(self.task_list):
-            task_queue = []
+            task_queue: List[Dict[str, Any]] = []
             if task.get("if_periodic", False):
-                period_ms = task["period_ms"]
+                period_ms: int = task["period_ms"]
                 while current_time < self.total_time_ms:
                     task_queue.append(
                         {
@@ -58,9 +58,9 @@ class DLSchedulingEnv(gym.Env):
                     )
                     current_time += period_ms
             else:
-                possion_lambda = task["possion_lambda"]
+                possion_lambda: int = task["possion_lambda"]
                 while current_time < self.total_time_ms:
-                    inter_arrival_time = np.random.poisson(possion_lambda)
+                    inter_arrival_time: int = np.random.poisson(possion_lambda)
                     task_queue.append(
                         {
                             "start_time": current_time,
@@ -160,18 +160,22 @@ class DLSchedulingEnv(gym.Env):
         Reset the environment and return the initial observation.
         """
         self.current_task_status: List[int] = [0] * self.num_tasks
-        self.task_start_times: Dict[int, float] = {
-            i: None for i in range(self.num_tasks)
-        }
-        self.task_end_times: Dict[int, float] = {i: None for i in range(self.num_tasks)}
+        self.task_start_times: Dict[int, float] = {}
+        self.task_end_times: Dict[int, float] = {}
+        self.stream_high_priority: torch.cuda.Stream = torch.cuda.Stream(priority=0)
+        self.stream_low_priority: torch.cuda.Stream = torch.cuda.Stream(priority=1)
 
         initial_observation: Dict[str, Any] = {
-            "task_deadlines": [self.config.get("total_time_ms", 10000)]
-            * self.num_tasks,
+            "current_streams_status": [False, False],
+            "current_time": np.array([0.0]),
+            "task_deadlines": np.array([task["deadline"] for task in self.task_list]),
+            "task_if_arrived": np.zeros(self.num_tasks),
+            "task_if_periodic": np.array(
+                [task.get("if_periodic", 0) for task in self.task_list]
+            ),
             "variant_runtimes": self.variant_runtimes,
             "variant_accuracies": self.variant_accuracies,
             "gpu_resources": self.get_gpu_resources(),
-            "current_stream": 0,  # Starting with the high priority stream
         }
         return initial_observation
 
@@ -181,8 +185,8 @@ class DLSchedulingEnv(gym.Env):
         """
         Execute a step in the environment based on the action provided.
         """
-        task_id: int = action["task_id"]
-        variant_id: int = action["variant_id"]
+        task_id: int = action["task1_id"]
+        variant_id: int = action["variant1_id"]
 
         task: Dict[str, Any] = self.task_list[task_id]
         variant_runtime = self.variant_runtimes[task_id][variant_id]
@@ -399,9 +403,9 @@ class SimpleContinuousAgent:
         """
         Select a random action from the action space.
         """
-        task_id = np.random.randint(self.action_space["task_id"].n)
-        variant_id = np.random.randint(self.action_space["variant_id"].n)
-        return {"task_id": task_id, "variant_id": variant_id}
+        task_id = np.random.randint(self.action_space["task1_id"].n)
+        variant_id = np.random.randint(self.action_space["variant1_id"].n)
+        return {"task1_id": task_id, "variant1_id": variant_id}
 
 
 agent = SimpleContinuousAgent(env.action_space, env.observation_space)
