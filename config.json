@@ -21,8 +21,8 @@
         },
         {
             "name": "task3",
-            "model": "vgg16",
-            "address": "selected_models/vgg16",
+            "model": "mobilenet_v3_large",
+            "address": "selected_models/mobilenet_v3_large",
             "data": "CIFAR10",
             "if_periodic": true,
             "period_ms": 20
