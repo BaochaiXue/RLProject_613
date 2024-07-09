@@ -7,9 +7,14 @@ import subprocess
 import pandas as pd
 import numpy as np
 import typing
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Callable
 import time
 import GPUtil
+import os
+import random
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms
+from torch import nn
 
 
 class DLSchedulingEnv(gym.Env):
@@ -22,7 +27,7 @@ class DLSchedulingEnv(gym.Env):
 
         # Read model information from CSV file
         self.model_info: pd.DataFrame = pd.read_csv(model_info_file)
-
+        self.start_time: float = time.time() * 1000  # Convert to milliseconds
         self.initialize_parameters()
         self.lock: threading.Lock = threading.Lock()
         self.event: threading.Event = threading.Event()
@@ -64,7 +69,7 @@ class DLSchedulingEnv(gym.Env):
                     task_queue.append(
                         {
                             "start_time": current_time,
-                            "deadline": current_time + inter_arrival_time,
+                            "deadline": task["deadline_ms"],
                         }
                     )
                     current_time += inter_arrival_time
@@ -93,7 +98,7 @@ class DLSchedulingEnv(gym.Env):
             variant_id: int = (
                 int(row["Model Number"]) - 1
             )  # Assuming variant_id starts from 0
-            runtime: float = row["Inference Time (s)"]
+            runtime: float = row["Inference Time (s)"] * 1000  # Convert to milliseconds
             accuracy: float = row["Accuracy (Percentage)"]
             if model_name not in runtime_dict:
                 runtime_dict[model_name] = [None] * self.num_variants
@@ -164,12 +169,22 @@ class DLSchedulingEnv(gym.Env):
         self.task_end_times: Dict[int, float] = {}
         self.stream_high_priority: torch.cuda.Stream = torch.cuda.Stream(priority=0)
         self.stream_low_priority: torch.cuda.Stream = torch.cuda.Stream(priority=1)
+        self.start_time = time.time() * 1000  # Convert to milliseconds
+
+        # Check if the task has arrived according to the task queue
+        task_if_arrived = np.zeros(self.num_tasks)
+        current_time_ms = time.time() * 1000  # Current time in milliseconds
+        for task_id, queue in self.task_queues.items():
+            for task in queue:
+                if task["start_time"] <= current_time_ms - self.start_time:
+                    task_if_arrived[task_id] = 1
+                    break
 
         initial_observation: Dict[str, Any] = {
             "current_streams_status": [False, False],
             "current_time": np.array([0.0]),
             "task_deadlines": np.array([task["deadline"] for task in self.task_list]),
-            "task_if_arrived": np.zeros(self.num_tasks),
+            "task_if_arrived": task_if_arrived,
             "task_if_periodic": np.array(
                 [task.get("if_periodic", 0) for task in self.task_list]
             ),
@@ -268,21 +283,21 @@ class DLSchedulingEnv(gym.Env):
         """
         Execute the specified task variant on the given GPU stream.
         """
-        command: List[str] = [
-            "python",
-            task["address"],
-            task["data"],
-            str(stream.priority),
-        ]
-        process: subprocess.Popen = subprocess.Popen(command)
-        self.task_start_times[task_id] = time.time()
-        self.monitor_task(process, variant_runtime, variant_accuracy, task_id, stream)
+        model = load_model(task["model"], variant_id + 1)  # Load the model
+        dataloader = load_single_test_image(
+            task.get("vit_16_using", False)
+        )  # Load data
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
+        result = check_inference_result(model, dataloader, device)
+        print(f"Task {task_id} Variant {variant_id} Result: {result}")
+        self.task_start_times[task_id] = time.time() * 1000  # Convert to milliseconds
+        self.monitor_task(model, dataloader, task_id, stream)
 
     def monitor_task(
         self,
-        process: subprocess.Popen,
-        variant_runtime: float,
-        variant_accuracy: float,
+        model: nn.Module,
+        dataloader: DataLoader,
         task_id: int,
         stream: torch.cuda.Stream,
     ) -> None:
@@ -291,25 +306,24 @@ class DLSchedulingEnv(gym.Env):
         """
         thread = threading.Thread(
             target=self._monitor_task,
-            args=(process, variant_runtime, variant_accuracy, task_id, stream),
+            args=(model, dataloader, task_id, stream),
         )
         thread.start()
 
     def _monitor_task(
         self,
-        process: subprocess.Popen,
-        variant_runtime: float,
-        variant_accuracy: float,
+        model: nn.Module,
+        dataloader: DataLoader,
         task_id: int,
         stream: torch.cuda.Stream,
     ) -> None:
         """
         Wait for the task to complete and update the GPU resources.
         """
-        process.wait()  # Wait for the subprocess to complete
+        result = check_inference_result(model, dataloader, torch.device("cuda"))
         with self.lock:
-            self.update_gpu_resources(variant_runtime, stream)
-        self.task_end_times[task_id] = time.time()
+            self.update_gpu_resources(model, stream)
+        self.task_end_times[task_id] = time.time() * 1000  # Convert to milliseconds
         self.event.set()
 
     def get_gpu_resources(self) -> List[float]:
@@ -322,9 +336,7 @@ class DLSchedulingEnv(gym.Env):
         loads = [gpu.load for gpu in gpus[:2]]  # Get load for the first two GPUs
         return [1.0 - load for load in loads]
 
-    def update_gpu_resources(
-        self, variant_runtime: float, stream: torch.cuda.Stream
-    ) -> None:
+    def update_gpu_resources(self, model: nn.Module, stream: torch.cuda.Stream) -> None:
         """
         Update the GPU resources after a task completes.
         """
@@ -334,11 +346,9 @@ class DLSchedulingEnv(gym.Env):
         """
         Calculate the reward based on task completion, GPU utilization, and accuracy.
         """
-        deadline = (
-            self.config.get("total_time_ms", 10000) / 1000.0
-        )  # Convert to seconds
-        end_time = self.task_end_times[task_id]
-        start_time = self.task_start_times[task_id]
+        deadline = self.config.get("total_time_ms", 10000)  # In milliseconds
+        end_time = self.task_end_times.get(task_id, 0)
+        start_time = self.task_start_times.get(task_id, 0)
         completion_time = end_time - start_time if end_time and start_time else 0
         ddl_miss_penalty = -10 if completion_time > deadline else 0
 
@@ -380,6 +390,68 @@ class DLSchedulingEnv(gym.Env):
         while True:
             self.check_tasks()
             time.sleep(0.1)  # Check every 0.1 seconds
+
+
+def load_single_test_image(vit_16_using: bool) -> DataLoader:
+    # Define the transformations based on whether ViT-16 is used
+    if vit_16_using:
+        transform: Callable[[Any], Any] = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
+                ),
+            ]
+        )
+    else:
+        transform: Callable[[Any], Any] = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
+                ),
+            ]
+        )
+
+    # Load the CIFAR-10 test set
+    testset: datasets.CIFAR10 = datasets.CIFAR10(
+        root="./data", train=False, download=True, transform=transform
+    )
+
+    # Randomly select one image from the test set
+    random_index: int = random.randint(0, len(testset) - 1)
+    test_subset: Subset[datasets.CIFAR10] = Subset(testset, [random_index])
+    testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
+
+    return testloader
+
+
+def load_model(model_name: str, model_number: int) -> nn.Module:
+    model_file = f"selected_models/{model_name}/{model_name}_{model_number}.pt"
+    if not os.path.exists(model_file):
+        raise FileNotFoundError(f"Model file {model_file} not found.")
+    model = torch.load(model_file)
+    return model
+
+
+def check_inference_result(
+    model: nn.Module, dataloader: DataLoader, device: torch.device
+) -> int:
+    model.eval()
+    correct: int = 0
+
+    with torch.no_grad():
+        for images, labels in dataloader:
+            images: torch.Tensor
+            labels: torch.Tensor
+            images, labels = images.to(device), labels.to(device)
+            outputs: torch.Tensor = model(images)
+            predicted: torch.Tensor
+            _, predicted = torch.max(outputs.data, 1)
+            correct += (predicted == labels).sum().item()
+
+    return 0 if correct == 1 else 1  # Return 0 if correct, 1 otherwise
 
 
 # Example usage:
