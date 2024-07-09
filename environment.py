@@ -17,12 +17,22 @@ from torchvision import datasets, transforms
 from torch import nn
 
 # Define the event object for stream availability
-stream_available_event = threading.Event()
+stream_available_event: threading.Event = threading.Event()
 
 
 def load_single_test_image(vit_16_using: bool) -> DataLoader:
+    """
+    Loads a single test image from the CIFAR10 dataset, applies transformations,
+    and returns it as a DataLoader object.
+
+    Parameters:
+        vit_16_using (bool): Flag indicating whether ViT-16 is being used.
+
+    Returns:
+        DataLoader: DataLoader object containing the transformed single test image.
+    """
     if vit_16_using:
-        transform = transforms.Compose(
+        transform: transforms.Compose = transforms.Compose(
             [
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
@@ -32,7 +42,7 @@ def load_single_test_image(vit_16_using: bool) -> DataLoader:
             ]
         )
     else:
-        transform = transforms.Compose(
+        transform: transforms.Compose = transforms.Compose(
             [
                 transforms.ToTensor(),
                 transforms.Normalize(
@@ -41,84 +51,118 @@ def load_single_test_image(vit_16_using: bool) -> DataLoader:
             ]
         )
 
-    testset = datasets.CIFAR10(
+    testset: datasets.CIFAR10 = datasets.CIFAR10(
         root="./data", train=False, download=True, transform=transform
     )
-    random_index = random.randint(0, len(testset) - 1)
-    test_subset = Subset(testset, [random_index])
-    testloader = DataLoader(test_subset, batch_size=1, shuffle=False)
+    random_index: int = random.randint(0, len(testset) - 1)
+    test_subset: Subset = Subset(testset, [random_index])
+    testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
     return testloader
 
 
 def load_model(model_name: str, model_number: int) -> nn.Module:
-    model_file = f"selected_models/{model_name}/{model_name}_{model_number}.pt"
+    """
+    Loads a pre-trained model from the specified path.
+
+    Parameters:
+        model_name (str): Name of the model to be loaded.
+        model_number (int): Specific number of the model variant.
+
+    Returns:
+        nn.Module: Loaded model.
+    """
+    model_file: str = f"selected_models/{model_name}/{model_name}_{model_number}.pt"
     if not os.path.exists(model_file):
         raise FileNotFoundError(f"Model file {model_file} not found.")
-    model = torch.load(model_file)
+    model: nn.Module = torch.load(model_file)
     return model
 
 
+def get_gpu_resources() -> Tuple[float, float]:
+    """
+    Retrieves the GPU utility rate and GPU memory utility rate of all GPUs.
+
+    Returns:
+        Tuple[float, float]: A tuple containing the average GPU utility rate and
+                            the average GPU memory utility rate of all GPUs.
+    """
+    # Retrieve a list of all GPUs
+    gpus: List[GPUtil.GPU] = GPUtil.getGPUs()
+
+    # Initialize variables to store the sum of utility rates
+    total_gpu_util: float = 0.0
+    total_mem_util: float = 0.0
+
+    # Iterate over all available GPUs
+    gpu: GPUtil.GPU
+    for gpu in gpus:
+        total_gpu_util += gpu.load
+        total_mem_util += gpu.memoryUtil
+
+    # Calculate the average utility rates
+    num_gpus: int = len(gpus)
+    avg_gpu_util: float = total_gpu_util / num_gpus if num_gpus > 0 else 0.0
+    avg_mem_util: float = total_mem_util / num_gpus if num_gpus > 0 else 0.0
+
+    return avg_gpu_util, avg_mem_util
+
+
 class DLSchedulingEnv(gym.Env):
-    def __init__(self, config_file: str, model_info_file: str):
+    def __init__(self, config_file: str, model_info_file: str) -> None:
+        """
+        Initializes the deep learning scheduling environment.
+
+        Parameters:
+            config_file (str): Path to the configuration file.
+            model_info_file (str): Path to the model information file.
+        """
         super(DLSchedulingEnv, self).__init__()
 
         with open(config_file, "r") as file:
-            self.config = json.load(file)
+            self.config: Dict[str, Any] = json.load(file)
 
-        self.model_info = pd.read_csv(model_info_file)
-        self.start_time = time.time() * 1000
+        self.model_info: pd.DataFrame = pd.read_csv(model_info_file)
+        self.start_time: float = time.time() * 1000
         self.initialize_parameters()
         self.define_spaces()
-        self.task_queues = self.generate_task_queues()
-        self.current_task_pointer = {task_id: 0 for task_id in range(self.num_tasks)}
-        self.if_periodic = [task.get("if_periodic", False) for task in self.task_list]
-        self.streams = [torch.cuda.Stream(priority=-1), torch.cuda.Stream(priority=0)]
-        self.stream_status = [False, False]  # False means idle, True means busy
-        self.task_arrived = [False] * self.num_tasks
-        self.task_threads = {}
-        self.lock = threading.Lock()
-        self.total_task_finished = [0] * self.num_tasks
-        self.total_task_accurate = [0] * self.num_tasks
-        self.total_missed_deadlines = [0] * self.num_tasks
-        self.thread_results: Dict[int, typing.Tuple[int, int]] = (
+        self.task_queues: Dict[int, List[Dict[str, Any]]] = self.generate_task_queues()
+        self.current_task_pointer: Dict[int, int] = {
+            task_id: 0 for task_id in range(self.num_tasks)
+        }
+        self.if_periodic: List[bool] = [
+            task.get("if_periodic", False) for task in self.task_list
+        ]
+        self.streams: List[torch.cuda.Stream] = [
+            torch.cuda.Stream(priority=-1),
+            torch.cuda.Stream(priority=0),
+        ]
+        self.stream_status: List[bool] = [
+            False,
+            False,
+        ]  # False means idle, True means busy
+        self.task_arrived: List[bool] = [False] * self.num_tasks
+        self.task_threads: Dict[int, threading.Thread] = {}
+        self.lock: threading.Lock = threading.Lock()
+        self.total_task_finished: List[int] = [0] * self.num_tasks
+        self.total_task_accurate: List[int] = [0] * self.num_tasks
+        self.total_missed_deadlines: List[int] = [0] * self.num_tasks
+        self.thread_results: Dict[int, Tuple[int, int]] = (
             {}
         )  # stream_id -> (correct, missed_deadline)
 
-    def get_gpu_resources() -> Tuple[float, float]:
+    def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
         """
-        Retrieves the GPU utility rate and GPU memory utility rate of all GPUs.
+        Generates task queues for all tasks based on their configuration.
 
         Returns:
-            Tuple[float, float]: A tuple containing the average GPU utility rate and
-                                the average GPU memory utility rate of all GPUs.
+            Dict[int, List[Dict[str, Any]]]: Dictionary containing task queues for each task.
         """
-        # Retrieve a list of all GPUs
-        gpus = GPUtil.getGPUs()
-
-        # Initialize variables to store the sum of utility rates
-        total_gpu_util = 0.0
-        total_mem_util = 0.0
-
-        # Iterate over all available GPUs
-        gpu: GPUtil.GPU
-        for gpu in gpus:
-            total_gpu_util += gpu.load
-            total_mem_util += gpu.memoryUtil
-
-        # Calculate the average utility rates
-        num_gpus = len(gpus)
-        avg_gpu_util = total_gpu_util / num_gpus if num_gpus > 0 else 0.0
-        avg_mem_util = total_mem_util / num_gpus if num_gpus > 0 else 0.0
-
-        return avg_gpu_util, avg_mem_util
-
-    def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
-        task_queues = {}
+        task_queues: Dict[int, List[Dict[str, Any]]] = {}
         for task_id, task in enumerate(self.task_list):
-            task_queue = []
-            current_time = 0
+            task_queue: List[Dict[str, Any]] = []
+            current_time: int = 0
             if task.get("if_periodic", False):
-                period_ms = task["period_ms"]
+                period_ms: int = task["period_ms"]
                 while current_time < self.total_time_ms:
                     task_queue.append(
                         {
@@ -128,9 +172,9 @@ class DLSchedulingEnv(gym.Env):
                     )
                     current_time += period_ms
             else:
-                possion_lambda = task["possion_lambda"]
+                possion_lambda: float = task["possion_lambda"]
                 while current_time < self.total_time_ms:
-                    inter_arrival_time = np.random.poisson(possion_lambda)
+                    inter_arrival_time: int = np.random.poisson(possion_lambda)
                     task_queue.append(
                         {
                             "start_time": current_time,
@@ -142,37 +186,49 @@ class DLSchedulingEnv(gym.Env):
         return task_queues
 
     def initialize_parameters(self) -> None:
-        self.num_tasks = self.config["num_tasks"]
-        self.num_variants = self.config["num_variants"]
-        self.total_time_ms = self.config["total_time_ms"]
-        self.task_list = self.config["task_list"]
+        """
+        Initializes the parameters for the environment based on the configuration file.
+        """
+        self.num_tasks: int = self.config["num_tasks"]
+        self.num_variants: int = self.config["num_variants"]
+        self.total_time_ms: int = self.config["total_time_ms"]
+        self.task_list: List[Dict[str, Any]] = self.config["task_list"]
 
         self.variant_runtimes, self.variant_accuracies = self._extract_variant_info()
 
-    def _extract_variant_info(self) -> typing.Tuple[np.ndarray, np.ndarray]:
-        runtime_dict = {}
-        accuracy_dict = {}
+    def _extract_variant_info(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Extracts variant runtime and accuracy information from the model information file.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: Tuple containing numpy arrays of variant runtimes and accuracies.
+        """
+        runtime_dict: Dict[str, List[float]] = {}
+        accuracy_dict: Dict[str, List[float]] = {}
         for _, row in self.model_info.iterrows():
-            model_name = row["Model Name"]
-            variant_id = int(row["Model Number"]) - 1
-            runtime = row["Inference Time (s)"] * 1000
-            accuracy = row["Accuracy (Percentage)"]
+            model_name: str = row["Model Name"]
+            variant_id: int = int(row["Model Number"]) - 1
+            runtime: float = row["Inference Time (s)"] * 1000
+            accuracy: float = row["Accuracy (Percentage)"]
             if model_name not in runtime_dict:
                 runtime_dict[model_name] = [None] * self.num_variants
                 accuracy_dict[model_name] = [None] * self.num_variants
             runtime_dict[model_name][variant_id] = runtime
             accuracy_dict[model_name][variant_id] = accuracy
 
-        runtimes = []
-        accuracies = []
+        runtimes: List[List[float]] = []
+        accuracies: List[List[float]] = []
         for task in self.task_list:
-            model_name = task["model"]
+            model_name: str = task["model"]
             runtimes.append(runtime_dict[model_name])
             accuracies.append(accuracy_dict[model_name])
         return np.array(runtimes), np.array(accuracies)
 
     def define_spaces(self) -> None:
-        self.action_space = spaces.Dict(
+        """
+        Defines the action and observation spaces for the environment.
+        """
+        self.action_space: spaces.Dict = spaces.Dict(
             {
                 "task1_id": spaces.Discrete(self.num_tasks + 1),
                 "variant1_id": spaces.Discrete(self.num_variants),
@@ -181,7 +237,7 @@ class DLSchedulingEnv(gym.Env):
             }
         )
 
-        self.observation_space = spaces.Dict(
+        self.observation_space: spaces.Dict = spaces.Dict(
             {
                 "current_streams_status": spaces.MultiBinary(2),
                 "current_time": spaces.Box(
@@ -209,15 +265,21 @@ class DLSchedulingEnv(gym.Env):
         )
 
     def reset(self) -> Dict[str, Any]:
+        """
+        Resets the environment to its initial state.
+
+        Returns:
+            Dict[str, Any]: Initial observation of the environment.
+        """
         self.current_task_pointer = {task_id: 0 for task_id in range(self.num_tasks)}
-        self.task_start_times = {}
-        self.task_end_times = {}
+        self.task_start_times: Dict[int, float] = {}
+        self.task_end_times: Dict[int, float] = {}
         self.start_time = time.time() * 1000
         task_if_arrived = np.zeros(self.num_tasks)
-        current_time_ms = time.time() * 1000
+        current_time_ms: float = time.time() * 1000
         for task_id, queue in self.task_queues.items():
             if self.current_task_pointer[task_id] < len(queue):
-                if_task_available = False
+                if_task_available: bool = False
                 while (
                     self.current_task_pointer[task_id] < len(queue)
                     and queue[self.current_task_pointer[task_id]]["deadline"]
@@ -236,7 +298,7 @@ class DLSchedulingEnv(gym.Env):
             else:
                 task_if_arrived[task_id] = False
         self.task_arrived = task_if_arrived
-        initial_observation = {
+        initial_observation: Dict[str, Any] = {
             "current_streams_status": [False, False],
             "current_time": np.array([current_time_ms - self.start_time]),
             "task_deadlines": np.array(
@@ -254,7 +316,7 @@ class DLSchedulingEnv(gym.Env):
             "task_if_periodic": np.array(self.if_periodic),
             "variant_runtimes": self.variant_runtimes,
             "variant_accuracies": self.variant_accuracies,
-            "gpu_resources": self.get_gpu_resources(),
+            "gpu_resources": get_gpu_resources(),
         }
 
         return initial_observation
@@ -268,20 +330,32 @@ class DLSchedulingEnv(gym.Env):
         deadline: float,
         event: threading.Event,
     ) -> None:
-        model = load_model(task["model"], variant_id + 1)
-        dataloader = load_single_test_image("vit" in task["model"])
-        device = torch.device(f"cuda:{stream_index}")
-        stream = self.streams[stream_index]
+        """
+        Executes a given task on a specified stream.
+
+        Parameters:
+            task (Dict[str, Any]): The task to be executed.
+            task_id (int): The ID of the task.
+            variant_id (int): The variant ID of the task.
+            stream_index (int): The index of the stream (0 or 1).
+            deadline (float): The deadline for the task.
+            event (threading.Event): Event object to signal task completion.
+        """
+        model: nn.Module = load_model(task["model"], variant_id + 1)
+        dataloader: DataLoader = load_single_test_image("vit" in task["model"])
+        device: torch.device = torch.device(f"cuda:{stream_index}")
+        stream: torch.cuda.Stream = self.streams[stream_index]
         # update the pointer
         self.current_task_pointer[task_id] += 1
         self.task_arrived[task_id] = False
+        penalty_function: Callable[[float], float] = lambda x: x * 10 if x > 0 else x
 
-        def task_thread():
+        def task_thread() -> None:
             nonlocal event
             self.stream_status[stream_index] = True
             with torch.cuda.stream(stream):
                 model.eval()
-                correct = 0
+                correct: int = 0
                 model.to(device)
                 with torch.no_grad():
                     for images, labels in dataloader:
@@ -296,27 +370,44 @@ class DLSchedulingEnv(gym.Env):
                         self.total_task_accurate[task_id] += 1
                     if time.time() * 1000 - self.start_time > deadline:
                         self.total_missed_deadlines[task_id] += 1
-                    self.thread_results[task_id] = (
-                        correct,
-                        1 if time.time() * 1000 - self.start_time > deadline else 0,
-                    )
+            self.thread_results[stream_index] = (
+                correct,
+                penalty_function(time.time() * 1000 - self.start_time - deadline),
+            )
             # Update the stream status
             self.stream_status[stream_index] = False
             event.set()
 
-        thread = threading.Thread(target=task_thread)
+        thread: threading.Thread = threading.Thread(target=task_thread)
         thread.start()
         self.task_threads[task_id] = thread
 
     def step(
         self, action: Dict[str, int]
-    ) -> typing.Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+    ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+        """
+        Executes a step in the environment based on the provided action.
+
+        Parameters:
+            action (Dict[str, int]): Dictionary containing the actions to be performed.
+
+        Returns:
+            Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+                - Observation after performing the action.
+                - Reward obtained.
+                - Boolean indicating if the episode is done.
+                - Additional information.
+        """
+        task1_id: int
+        variant1_id: int
+        task2_id: int
+        variant2_id: int
         task1_id, variant1_id = action["task1_id"], action["variant1_id"]
         task2_id, variant2_id = action["task2_id"], action["variant2_id"]
 
-        if_first_action_is_idle = task1_id == self.num_tasks
-        if_second_action_is_idle = task2_id == self.num_tasks
-        tmp_reward = 0.0
+        if_first_action_is_idle: bool = task1_id == self.num_tasks
+        if_second_action_is_idle: bool = task2_id == self.num_tasks
+        tmp_reward: float = 0.0
         # check if the task has arrived
         if if_first_action_is_idle and if_second_action_is_idle:
             tmp_reward -= 50  # penalty for selecting two idle actions
@@ -348,10 +439,10 @@ class DLSchedulingEnv(gym.Env):
         while not any(not status for status in self.stream_status):
             stream_available_event.wait()
             stream_available_event.clear()
-        current_time_ms = time.time() * 1000
+        current_time_ms: float = time.time() * 1000
         for task_id, queue in self.task_queues.items():
             if self.current_task_pointer[task_id] < len(queue):
-                if_task_available = False
+                if_task_available: bool = False
                 while (
                     self.current_task_pointer[task_id] < len(queue)
                     and queue[self.current_task_pointer[task_id]]["deadline"]
@@ -369,8 +460,8 @@ class DLSchedulingEnv(gym.Env):
                     self.task_arrived[task_id] = False
             else:
                 self.task_arrived[task_id] = False
-        gpu_resources = self.get_gpu_resources()
-        observation = {
+        gpu_resources: Tuple[float, float] = get_gpu_resources()
+        observation: Dict[str, Any] = {
             "current_streams_status": self.stream_status,
             "current_time": np.array([current_time_ms - self.start_time]),
             "task_deadlines": np.array(
@@ -390,7 +481,7 @@ class DLSchedulingEnv(gym.Env):
             "variant_accuracies": self.variant_accuracies,
             "gpu_resources": gpu_resources,
         }
-        reward = (
+        reward: float = (
             tmp_reward
             + (self.thread_results[0][0] * 100 if self.stream_status[0] else 0)
             + (self.thread_results[1][0] * 100 if self.stream_status[1] else 0)
@@ -399,21 +490,24 @@ class DLSchedulingEnv(gym.Env):
             + 50
             * (gpu_resources[0] + gpu_resources[1])  # encourage to use GPU resources
         )
-        done = current_time_ms - self.start_time >= self.total_time_ms
-        info = {}
+        done: bool = current_time_ms - self.start_time >= self.total_time_ms
+        info: Dict[str, Any] = {}
 
         return observation, reward, done, info
 
     def close(self) -> None:
+        """
+        Closes the environment and waits for all threads to complete.
+        """
         for thread in self.task_threads.values():
             thread.join()
         del self.streams
 
 
 # Example usage:
-env = DLSchedulingEnv(
+env: DLSchedulingEnv = DLSchedulingEnv(
     config_file="config.json", model_info_file="model_information.csv"
 )
 
 # Reset environment to get the initial observation
-observation = env.reset()
+observation: Dict[str, Any] = env.reset()
