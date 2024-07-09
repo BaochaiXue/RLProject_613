@@ -2,7 +2,7 @@ import json
 import gym
 from gym import spaces
 import torch
-import threading
+import concurrent.futures
 import subprocess
 import pandas as pd
 import numpy as np
@@ -15,9 +15,7 @@ import random
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from torch import nn
-
-# Define the event object for stream availability
-stream_available_event: threading.Event = threading.Event()
+import threading
 
 
 def load_single_test_image(vit_16_using: bool) -> DataLoader:
@@ -141,14 +139,18 @@ class DLSchedulingEnv(gym.Env):
             False,
         ]  # False means idle, True means busy
         self.task_arrived: List[bool] = [False] * self.num_tasks
-        self.task_threads: Dict[int, threading.Thread] = {}
+        self.executor: concurrent.futures.ThreadPoolExecutor = (
+            concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        )
         self.lock: threading.Lock = threading.Lock()
         self.total_task_finished: List[int] = [0] * self.num_tasks
         self.total_task_accurate: List[int] = [0] * self.num_tasks
         self.total_missed_deadlines: List[int] = [0] * self.num_tasks
-        self.thread_results: Dict[int, Tuple[int, int]] = (
+        self.future_to_stream_index: Dict[concurrent.futures.Future, int] = {}
+        self.streamResults: Dict[int, Tuple[int, int]] = (
             {}
         )  # stream_id -> (correct, missed_deadline)
+        self.futures: List[concurrent.futures.Future] = []
 
     def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
         """
@@ -328,8 +330,7 @@ class DLSchedulingEnv(gym.Env):
         variant_id: int,
         stream_index: int,  # 0 or 1
         deadline: float,
-        event: threading.Event,
-    ) -> None:
+    ) -> Tuple[int, int]:
         """
         Executes a given task on a specified stream.
 
@@ -339,48 +340,39 @@ class DLSchedulingEnv(gym.Env):
             variant_id (int): The variant ID of the task.
             stream_index (int): The index of the stream (0 or 1).
             deadline (float): The deadline for the task.
-            event (threading.Event): Event object to signal task completion.
+
+        Returns:
+            Tuple[int, int]: Result of the task execution indicating correctness and penalty.
         """
         model: nn.Module = load_model(task["model"], variant_id + 1)
         dataloader: DataLoader = load_single_test_image("vit" in task["model"])
         device: torch.device = torch.device(f"cuda:{stream_index}")
         stream: torch.cuda.Stream = self.streams[stream_index]
-        # update the pointer
         self.current_task_pointer[task_id] += 1
         self.task_arrived[task_id] = False
         penalty_function: Callable[[float], float] = lambda x: x * 10 if x > 0 else x
 
-        def task_thread() -> None:
-            nonlocal event
-            self.stream_status[stream_index] = True
-            with torch.cuda.stream(stream):
-                model.eval()
-                correct: int = 0
-                model.to(device)
-                with torch.no_grad():
-                    for images, labels in dataloader:
-                        images, labels = images.to(device), labels.to(device)
-                        outputs = model(images)
-                        _, predicted = torch.max(outputs.data, 1)
-                        correct += (predicted == labels).sum().item()
-                # Update the total task finished and accuracy counts
-                with self.lock:
-                    self.total_task_finished[task_id] += 1
-                    if correct == 1:
-                        self.total_task_accurate[task_id] += 1
-                    if time.time() * 1000 - self.start_time > deadline:
-                        self.total_missed_deadlines[task_id] += 1
-            self.thread_results[stream_index] = (
-                correct,
-                penalty_function(time.time() * 1000 - self.start_time - deadline),
-            )
-            # Update the stream status
-            self.stream_status[stream_index] = False
-            event.set()
-
-        thread: threading.Thread = threading.Thread(target=task_thread)
-        thread.start()
-        self.task_threads[task_id] = thread
+        with torch.cuda.stream(stream):
+            model.eval()
+            correct: int = 0
+            model.to(device)
+            with torch.no_grad():
+                for images, labels in dataloader:
+                    images, labels = images.to(device), labels.to(device)
+                    outputs = model(images)
+                    _, predicted = torch.max(outputs.data, 1)
+                    correct += (predicted == labels).sum().item()
+            # Update the total task finished and accuracy counts
+            with self.lock:
+                self.total_task_finished[task_id] += 1
+                if correct == 1:
+                    self.total_task_accurate[task_id] += 1
+                if time.time() * 1000 - self.start_time > deadline:
+                    self.total_missed_deadlines[task_id] += 1
+        return (
+            correct,
+            penalty_function(time.time() * 1000 - self.start_time - deadline),
+        )
 
     def step(
         self, action: Dict[str, int]
@@ -420,25 +412,51 @@ class DLSchedulingEnv(gym.Env):
             tmp_reward -= 100  # penalty for selecting a task for busy stream
         if not if_second_action_is_idle and self.stream_status[1]:
             tmp_reward -= 100  # penalty for selecting a task for busy stream
+
+        futures: List[concurrent.futures.Future] = []
+
         if not self.stream_status[0] and not if_first_action_is_idle:
-            self.execute_task(
+            self.stream_status[0] = True
+            future = self.executor.submit(
+                self.execute_task,
                 self.task_list[task1_id],
                 task1_id,
                 variant1_id,
                 0,
-                stream_available_event,
+                self.task_queues[task1_id][self.current_task_pointer[task1_id]][
+                    "deadline"
+                ],
             )
+            self.futures.append(future)
+            self.future_to_stream_index[future] = 0
+
         if not self.stream_status[1] and not if_second_action_is_idle:
-            self.execute_task(
+            self.stream_status[1] = True
+            future = self.executor.submit(
+                self.execute_task,
                 self.task_list[task2_id],
                 task2_id,
                 variant2_id,
                 1,
-                stream_available_event,
+                self.task_queues[task2_id][self.current_task_pointer[task2_id]][
+                    "deadline"
+                ],
             )
-        while not any(not status for status in self.stream_status):
-            stream_available_event.wait()
-            stream_available_event.clear()
+            self.futures.append(future)
+            self.future_to_stream_index[future] = 1
+
+        # Wait for any of the futures to complete
+        done_futures, _ = concurrent.futures.wait(
+            self.futures, return_when=concurrent.futures.FIRST_COMPLETED
+        )
+
+        for future in done_futures:
+            result: Tuple[int, int] = future.result()
+            stream_index: int = self.future_to_stream_index[future]
+            self.streamResults[stream_index] = result
+            self.stream_status[stream_index] = False
+            self.futures.remove(future)
+
         current_time_ms: float = time.time() * 1000
         for task_id, queue in self.task_queues.items():
             if self.current_task_pointer[task_id] < len(queue):
@@ -483,10 +501,10 @@ class DLSchedulingEnv(gym.Env):
         }
         reward: float = (
             tmp_reward
-            + (self.thread_results[0][0] * 100 if self.stream_status[0] else 0)
-            + (self.thread_results[1][0] * 100 if self.stream_status[1] else 0)
-            - (self.thread_results[0][1] * 100 if self.stream_status[0] else 0)
-            - (self.thread_results[1][1] * 100 if self.stream_status[1] else 0)
+            + (self.streamResults[0][0] * 100 if self.stream_status[0] else 0)
+            + (self.streamResults[1][0] * 100 if self.stream_status[1] else 0)
+            - (self.streamResults[0][1] * 100 if self.stream_status[0] else 0)
+            - (self.streamResults[1][1] * 100 if self.stream_status[1] else 0)
             + 50
             * (gpu_resources[0] + gpu_resources[1])  # encourage to use GPU resources
         )
@@ -499,8 +517,7 @@ class DLSchedulingEnv(gym.Env):
         """
         Closes the environment and waits for all threads to complete.
         """
-        for thread in self.task_threads.values():
-            thread.join()
+        self.executor.shutdown(wait=True)
         del self.streams
 
 
@@ -509,5 +526,5 @@ env: DLSchedulingEnv = DLSchedulingEnv(
     config_file="config.json", model_info_file="model_information.csv"
 )
 
-# Reset environment to get the initial observation
+# Reset the environment to get the initial observation
 observation: Dict[str, Any] = env.reset()
