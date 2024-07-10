@@ -51,7 +51,7 @@ def load_single_test_image(vit_16_using: bool) -> DataLoader:
 
 
 def load_model(model_name: str, model_number: int) -> nn.Module:
-    model_file = f"selected_models/{model_name}/{model_name}_{model_number}.pt"
+    model_file = f"selected_models/{model_name}/{model_name}_{model_number}.pth"
     if not os.path.exists(model_file):
         raise FileNotFoundError(f"Model file {model_file} not found.")
     model = torch.load(model_file)

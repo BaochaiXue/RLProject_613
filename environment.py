@@ -16,6 +16,25 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from torch import nn
 import threading
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.callbacks import (
+    EvalCallback,
+    StopTrainingOnRewardThreshold,
+)
+import sys
+import contextlib
+
+
+@contextlib.contextmanager
+def suppress_stdout():
+    with open(os.devnull, "w") as devnull:
+        old_stdout = sys.stdout
+        sys.stdout = devnull
+        try:
+            yield
+        finally:
+            sys.stdout = old_stdout
 
 
 def load_single_test_image(vit_16_using: bool) -> DataLoader:
@@ -49,9 +68,10 @@ def load_single_test_image(vit_16_using: bool) -> DataLoader:
             ]
         )
 
-    testset: datasets.CIFAR10 = datasets.CIFAR10(
-        root="./data", train=False, download=True, transform=transform
-    )
+    with suppress_stdout():
+        testset: datasets.CIFAR10 = datasets.CIFAR10(
+            root="./data", train=False, download=True, transform=transform
+        )
     random_index: int = random.randint(0, len(testset) - 1)
     test_subset: Subset = Subset(testset, [random_index])
     testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
@@ -69,7 +89,7 @@ def load_model(model_name: str, model_number: int) -> nn.Module:
     Returns:
         nn.Module: Loaded model.
     """
-    model_file: str = f"selected_models/{model_name}/{model_name}_{model_number}.pt"
+    model_file: str = f"selected_models/{model_name}/{model_name}_{model_number}.pth"
     if not os.path.exists(model_file):
         raise FileNotFoundError(f"Model file {model_file} not found.")
     model: nn.Module = torch.load(model_file)
@@ -92,7 +112,7 @@ def get_gpu_resources() -> Tuple[float, float]:
     total_mem_util: float = 0.0
 
     # Iterate over all available GPUs
-    gpu: GPUtil.GPU
+    gpu: GPUtil.GGPU
     for gpu in gpus:
         total_gpu_util += gpu.load
         total_mem_util += gpu.memoryUtil
@@ -130,10 +150,6 @@ class DLSchedulingEnv(gym.Env):
         self.if_periodic: List[bool] = [
             task.get("if_periodic", False) for task in self.task_list
         ]
-        self.streams: List[torch.cuda.Stream] = [
-            torch.cuda.Stream(priority=-1),
-            torch.cuda.Stream(priority=0),
-        ]
         self.stream_status: List[bool] = [
             False,
             False,
@@ -148,6 +164,10 @@ class DLSchedulingEnv(gym.Env):
         self.total_missed_deadlines: List[int] = [0] * self.num_tasks
         self.future_to_stream_index: Dict[concurrent.futures.Future, int] = {}
         self.futures: List[concurrent.futures.Future] = []
+        self.streams: List[torch.cuda.Stream] = [
+            torch.cuda.Stream(priority=-1),
+            torch.cuda.Stream(priority=0),
+        ]
 
     def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
         """
@@ -240,26 +260,28 @@ class DLSchedulingEnv(gym.Env):
             {
                 "current_streams_status": spaces.MultiBinary(2),
                 "current_time": spaces.Box(
-                    low=0, high=float("inf"), shape=(1,), dtype=float
+                    low=0, high=float("inf"), shape=(1,), dtype=np.float32
                 ),
                 "task_deadlines": spaces.Box(
-                    low=0, high=float("inf"), shape=(self.num_tasks,), dtype=float
+                    low=0, high=float("inf"), shape=(self.num_tasks,), dtype=np.float32
                 ),
-                "task_if_arrived": spaces.Discrete(self.num_tasks),
-                "task_if_periodic": spaces.Discrete(self.num_tasks),
+                "task_if_arrived": spaces.MultiBinary(self.num_tasks),
+                "task_if_periodic": spaces.MultiBinary(self.num_tasks),
                 "variant_runtimes": spaces.Box(
                     low=0,
                     high=float("inf"),
                     shape=(self.num_tasks, self.num_variants),
-                    dtype=float,
+                    dtype=np.float32,
                 ),
                 "variant_accuracies": spaces.Box(
                     low=0,
                     high=100,
                     shape=(self.num_tasks, self.num_variants),
-                    dtype=float,
+                    dtype=np.float32,
                 ),
-                "gpu_resources": spaces.Box(low=0, high=1, shape=(2,), dtype=float),
+                "gpu_resources": spaces.Box(
+                    low=0, high=1, shape=(2,), dtype=np.float32
+                ),
             }
         )
 
@@ -274,7 +296,7 @@ class DLSchedulingEnv(gym.Env):
         self.task_start_times: Dict[int, float] = {}
         self.task_end_times: Dict[int, float] = {}
         self.start_time = time.time() * 1000
-        task_if_arrived = np.zeros(self.num_tasks)
+        task_if_arrived = np.zeros(self.num_tasks, dtype=np.float32)
         current_time_ms: float = time.time() * 1000
         for task_id, queue in self.task_queues.items():
             if self.current_task_pointer[task_id] < len(queue):
@@ -290,16 +312,18 @@ class DLSchedulingEnv(gym.Env):
                     and queue[self.current_task_pointer[task_id]]["start_time"]
                     <= current_time_ms - self.start_time
                 ):
-                    task_if_arrived[task_id] = True
+                    task_if_arrived[task_id] = 1
                     if_task_available = True
                 if not if_task_available:
-                    task_if_arrived[task_id] = False
+                    task_if_arrived[task_id] = 0
             else:
-                task_if_arrived[task_id] = False
+                task_if_arrived[task_id] = 0
         self.task_arrived = task_if_arrived
         initial_observation: Dict[str, Any] = {
-            "current_streams_status": [False, False],
-            "current_time": np.array([current_time_ms - self.start_time]),
+            "current_streams_status": np.array([0, 0], dtype=np.float32),
+            "current_time": np.array(
+                [current_time_ms - self.start_time], dtype=np.float32
+            ),
             "task_deadlines": np.array(
                 [
                     (
@@ -309,13 +333,14 @@ class DLSchedulingEnv(gym.Env):
                         else -float("inf")
                     )
                     for task_id, queue in self.task_queues.items()
-                ]
+                ],
+                dtype=np.float32,
             ),
             "task_if_arrived": task_if_arrived,
-            "task_if_periodic": np.array(self.if_periodic),
-            "variant_runtimes": self.variant_runtimes,
-            "variant_accuracies": self.variant_accuracies,
-            "gpu_resources": get_gpu_resources(),
+            "task_if_periodic": np.array(self.if_periodic, dtype=np.float32),
+            "variant_runtimes": self.variant_runtimes.astype(np.float32),
+            "variant_accuracies": self.variant_accuracies.astype(np.float32),
+            "gpu_resources": np.array(get_gpu_resources(), dtype=np.float32),
         }
 
         return initial_observation
@@ -343,7 +368,9 @@ class DLSchedulingEnv(gym.Env):
         """
         model: nn.Module = load_model(task["model"], variant_id + 1)
         dataloader: DataLoader = load_single_test_image("vit" in task["model"])
-        device: torch.device = torch.device(f"cuda:{stream_index}")
+        device: torch.device = torch.device(
+            f"cuda:0" if torch.cuda.is_available() else "cpu"
+        )
         stream: torch.cuda.Stream = self.streams[stream_index]
         self.current_task_pointer[task_id] += 1
         self.task_arrived[task_id] = False
@@ -476,8 +503,10 @@ class DLSchedulingEnv(gym.Env):
                 self.task_arrived[task_id] = False
         gpu_resources: Tuple[float, float] = get_gpu_resources()
         observation: Dict[str, Any] = {
-            "current_streams_status": self.stream_status,
-            "current_time": np.array([current_time_ms - self.start_time]),
+            "current_streams_status": np.array(self.stream_status, dtype=np.float32),
+            "current_time": np.array(
+                [current_time_ms - self.start_time], dtype=np.float32
+            ),
             "task_deadlines": np.array(
                 [
                     (
@@ -487,13 +516,14 @@ class DLSchedulingEnv(gym.Env):
                         else -float("inf")
                     )
                     for task_id, queue in self.task_queues.items()
-                ]
+                ],
+                dtype=np.float32,
             ),
-            "task_if_arrived": self.task_arrived,
-            "task_if_periodic": np.array(self.if_periodic),
-            "variant_runtimes": self.variant_runtimes,
-            "variant_accuracies": self.variant_accuracies,
-            "gpu_resources": gpu_resources,
+            "task_if_arrived": np.array(self.task_arrived, dtype=np.float32),
+            "task_if_periodic": np.array(self.if_periodic, dtype=np.float32),
+            "variant_runtimes": self.variant_runtimes.astype(np.float32),
+            "variant_accuracies": self.variant_accuracies.astype(np.float32),
+            "gpu_resources": np.array(gpu_resources, dtype=np.float32),
         }
         reward: float = tmp_reward + 50 * (
             gpu_resources[0] + gpu_resources[1]
@@ -508,13 +538,53 @@ class DLSchedulingEnv(gym.Env):
         Closes the environment and waits for all threads to complete.
         """
         self.executor.shutdown(wait=True)
+        # clean up the GPU streams
+        for stream in self.streams:
+            stream.synchronize()
         del self.streams
 
 
-# Example usage:
-env: DLSchedulingEnv = DLSchedulingEnv(
-    config_file="config.json", model_info_file="model_information.csv"
-)
+if __name__ == "__main__":
+    # Example usage:
+    env: DLSchedulingEnv = DLSchedulingEnv(
+        config_file="config.json", model_info_file="model_information.csv"
+    )
 
-# Reset the environment to get the initial observation
-observation: Dict[str, Any] = env.reset()
+    # Reset the environment to get the initial observation
+    observation: Dict[str, Any] = env.reset()
+
+    # Wrap the environment to use vectorized environments, which is required by stable-baselines3
+    env = make_vec_env(lambda: env, n_envs=1)
+
+    # Define a callback to evaluate and stop training once a reward threshold is achieved
+    eval_callback = EvalCallback(
+        env,
+        best_model_save_path="./logs/",
+        log_path="./logs/",
+        eval_freq=500,
+        deterministic=True,
+        render=False,
+    )
+
+    # Automatically select an available GPU
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    # Initialize the PPO model
+    model = PPO(
+        "MultiInputPolicy", env, verbose=1, tensorboard_log="./logs/", device=device
+    )
+
+    # Train the model
+    model.learn(total_timesteps=100000, callback=eval_callback)
+
+    # Save the model
+    model.save("ppo_dl_scheduling")
+
+    # Load the model for further use or evaluation
+    model = PPO.load("ppo_dl_scheduling")
+
+    # Evaluate the model
+    obs = env.reset()
+    for _ in range(1000):
+        action, _states = model.predict(obs, deterministic=True)
+        obs, rewards, dones, info = env.step(action)
