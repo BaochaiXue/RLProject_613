@@ -227,13 +227,13 @@ class DLSchedulingEnv(gym.Env):
         """
         Defines the action and observation spaces for the environment.
         """
-        self.action_space: spaces.Dict = spaces.Dict(
-            {
-                "task1_id": spaces.Discrete(self.num_tasks + 1),
-                "variant1_id": spaces.Discrete(self.num_variants),
-                "task2_id": spaces.Discrete(self.num_tasks + 1),
-                "variant2_id": spaces.Discrete(self.num_variants),
-            }
+        self.action_space: spaces.MultiDiscrete = spaces.MultiDiscrete(
+            [
+                self.num_tasks + 1,
+                self.num_variants,
+                self.num_tasks + 1,
+                self.num_variants,
+            ]
         )
 
         self.observation_space: spaces.Dict = spaces.Dict(
@@ -373,13 +373,13 @@ class DLSchedulingEnv(gym.Env):
         )
 
     def step(
-        self, action: Dict[str, int]
+        self, action: np.ndarray
     ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
         """
         Executes a step in the environment based on the provided action.
 
         Parameters:
-            action (Dict[str, int]): Dictionary containing the actions to be performed.
+            action (np.ndarray): Array containing the actions to be performed.
 
         Returns:
             Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
@@ -388,12 +388,7 @@ class DLSchedulingEnv(gym.Env):
                 - Boolean indicating if the episode is done.
                 - Additional information.
         """
-        task1_id: int
-        variant1_id: int
-        task2_id: int
-        variant2_id: int
-        task1_id, variant1_id = action["task1_id"], action["variant1_id"]
-        task2_id, variant2_id = action["task2_id"], action["variant2_id"]
+        task1_id, variant1_id, task2_id, variant2_id = action
 
         if_first_action_is_idle: bool = task1_id == self.num_tasks
         if_second_action_is_idle: bool = task2_id == self.num_tasks
