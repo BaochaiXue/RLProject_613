@@ -270,9 +270,6 @@ class DLSchedulingEnv(gym.Env):
         self.observation_space: spaces.Dict = spaces.Dict(
             {
                 "current_streams_status": spaces.MultiBinary(2),
-                "current_time": spaces.Box(
-                    low=0, high=float("inf"), shape=(1,), dtype=np.float32
-                ),
                 "task_deadlines": spaces.Box(
                     low=0, high=float("inf"), shape=(self.num_tasks,), dtype=np.float32
                 ),
@@ -332,21 +329,22 @@ class DLSchedulingEnv(gym.Env):
             else:
                 task_if_arrived[task_id] = 0
         self.task_arrived = task_if_arrived
+        task_ddls: List[float] = []
+        for task_id, queue in self.task_queues.items():
+            if (
+                self.current_task_pointer[task_id] < len(queue)
+                and self.task_arrived[task_id]
+            ):
+                task_ddls.append(
+                    queue[self.current_task_pointer[task_id]]["deadline"]
+                    - (current_time_ms - self.start_time)
+                )
+            else:
+                task_ddls.append(-float("inf"))
         initial_observation: Dict[str, Any] = {
             "current_streams_status": np.array([0, 0], dtype=np.float32),
-            "current_time": np.array(
-                [current_time_ms - self.start_time], dtype=np.float32
-            ),
-            "task_deadlines": np.array(
-                [
-                    (
-                        queue[self.current_task_pointer[task_id]]["deadline"]
-                        - (current_time_ms - self.start_time)
-                        if self.current_task_pointer[task_id] < len(queue)
-                        else -float("inf")
-                    )
-                    for task_id, queue in self.task_queues.items()
-                ],
+            "task_deadlines": np.array(  # remaining time to deadline
+                task_ddls,
                 dtype=np.float32,
             ),
             "task_if_arrived": task_if_arrived,
@@ -387,7 +385,6 @@ class DLSchedulingEnv(gym.Env):
             f"cuda:0" if torch.cuda.is_available() else "cpu"
         )
         stream: torch.cuda.Stream = self.streams[stream_index]
-        self.current_task_pointer[task_id] += 1
         self.task_arrived[task_id] = False
         penalty_function: Callable[[float], float] = lambda x: x * 10 if x > 0 else x
 
@@ -447,10 +444,21 @@ class DLSchedulingEnv(gym.Env):
             tmp_reward -= 100  # penalty for selecting a task for busy stream
         if not if_second_action_is_idle and self.stream_status[1]:
             tmp_reward -= 100  # penalty for selecting a task for busy stream
-
-        futures: List[concurrent.futures.Future] = []
-
-        if not self.stream_status[0] and not if_first_action_is_idle:
+        # check if the task has finished
+        if not if_first_action_is_idle and self.current_task_pointer[task1_id] >= len(
+            self.task_queues[task1_id]
+        ):
+            tmp_reward -= 100  # penalty for selecting a task that has finished
+        if not if_second_action_is_idle and self.current_task_pointer[task2_id] >= len(
+            self.task_queues[task2_id]
+        ):
+            tmp_reward -= 100  # penalty for selecting a task that has finished
+        if (
+            not self.stream_status[0]
+            and not if_first_action_is_idle
+            and self.task_arrived[task1_id]
+            and self.current_task_pointer[task1_id] < len(self.task_queues[task1_id])
+        ):
             self.stream_status[0] = True
             future = self.executor.submit(
                 self.execute_task,
@@ -462,10 +470,16 @@ class DLSchedulingEnv(gym.Env):
                     "deadline"
                 ],
             )
+            self.current_task_pointer[task1_id] += 1
             self.futures.append(future)
             self.future_to_stream_index[future] = 0
 
-        if not self.stream_status[1] and not if_second_action_is_idle:
+        if (
+            not self.stream_status[1]
+            and not if_second_action_is_idle
+            and self.task_arrived[task2_id]
+            and self.current_task_pointer[task2_id] < len(self.task_queues[task2_id])
+        ):
             self.stream_status[1] = True
             future = self.executor.submit(
                 self.execute_task,
@@ -477,6 +491,7 @@ class DLSchedulingEnv(gym.Env):
                     "deadline"
                 ],
             )
+            self.current_task_pointer[task2_id] += 1
             self.futures.append(future)
             self.future_to_stream_index[future] = 1
 
@@ -507,6 +522,11 @@ class DLSchedulingEnv(gym.Env):
                     # missed deadline
                     self.total_missed_deadlines[task_id] += 1
                     self.current_task_pointer[task_id] += 1
+                    tmp_reward -= 1000 * (
+                        current_time_ms
+                        - self.start_time
+                        - queue[self.current_task_pointer[task_id]]["deadline"]
+                    )
                 if (
                     self.current_task_pointer[task_id] < len(queue)
                     and queue[self.current_task_pointer[task_id]]["start_time"]
@@ -519,21 +539,22 @@ class DLSchedulingEnv(gym.Env):
             else:
                 self.task_arrived[task_id] = False
         gpu_resources: Tuple[float, float] = get_gpu_resources()
+        task_ddls: List[float] = []
+        for task_id, queue in self.task_queues.items():
+            if (
+                self.current_task_pointer[task_id] < len(queue)
+                and self.task_arrived[task_id]
+            ):
+                task_ddls.append(
+                    queue[self.current_task_pointer[task_id]]["deadline"]
+                    - (current_time_ms - self.start_time)
+                )
+            else:
+                task_ddls.append(-float("inf"))
         observation: Dict[str, Any] = {
             "current_streams_status": np.array(self.stream_status, dtype=np.float32),
-            "current_time": np.array(
-                [current_time_ms - self.start_time], dtype=np.float32
-            ),
             "task_deadlines": np.array(
-                [
-                    (
-                        queue[self.current_task_pointer[task_id]]["deadline"]
-                        - (current_time_ms - self.start_time)
-                        if self.current_task_pointer[task_id] < len(queue)
-                        else -float("inf")
-                    )
-                    for task_id, queue in self.task_queues.items()
-                ],
+                task_ddls,
                 dtype=np.float32,
             ),
             "task_if_arrived": np.array(self.task_arrived, dtype=np.float32),
@@ -545,7 +566,7 @@ class DLSchedulingEnv(gym.Env):
         reward: float = tmp_reward + 50 * (
             gpu_resources[0] + gpu_resources[1]
         )  # encourage to use GPU resources
-        done: bool = current_time_ms - self.start_time >= self.total_time_ms
+        done: bool = (current_time_ms - self.start_time) >= self.total_time_ms
         info: Dict[str, Any] = {}
         # Ensure no NaN values in the observation
         for key, value in observation.items():
@@ -583,7 +604,7 @@ if __name__ == "__main__":
     # Set up the logger
 
     # Automatically select an available GPU
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
 
     # Initialize the PPO model with gradient clipping
     model = PPO(
