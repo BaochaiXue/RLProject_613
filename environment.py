@@ -311,6 +311,7 @@ class DLSchedulingEnv(gym.Env):
         stream_index: int,
         deadline: float,
     ) -> Tuple[int, int]:
+        global debug_count
         if debug_count % 1431 == 0:
             print(f"Stream Status: {self.stream_is_busy}")
             print(f"Task Arrived: {self.task_arrived}")
