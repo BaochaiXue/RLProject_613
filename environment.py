@@ -147,9 +147,6 @@ class DLSchedulingEnv(gym.Env):
         self.total_task_accurate: List[int] = [0] * self.num_tasks
         self.total_missed_deadlines: List[int] = [0] * self.num_tasks
         self.future_to_stream_index: Dict[concurrent.futures.Future, int] = {}
-        self.streamResults: Dict[int, Tuple[int, int]] = (
-            {}
-        )  # stream_id -> (correct, missed_deadline)
         self.futures: List[concurrent.futures.Future] = []
 
     def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
@@ -362,16 +359,17 @@ class DLSchedulingEnv(gym.Env):
                     outputs = model(images)
                     _, predicted = torch.max(outputs.data, 1)
                     correct += (predicted == labels).sum().item()
+            finish_time: float = time.time() * 1000
             # Update the total task finished and accuracy counts
             with self.lock:
                 self.total_task_finished[task_id] += 1
                 if correct == 1:
                     self.total_task_accurate[task_id] += 1
-                if time.time() * 1000 - self.start_time > deadline:
+                if finish_time - self.start_time > deadline:
                     self.total_missed_deadlines[task_id] += 1
         return (
             correct,
-            penalty_function(time.time() * 1000 - self.start_time - deadline),
+            penalty_function(finish_time - self.start_time - deadline),
         )
 
     def step(
@@ -453,9 +451,12 @@ class DLSchedulingEnv(gym.Env):
         for future in done_futures:
             result: Tuple[int, int] = future.result()
             stream_index: int = self.future_to_stream_index[future]
-            self.streamResults[stream_index] = result
             self.stream_status[stream_index] = False
             self.futures.remove(future)
+            # Update the reward based on the result
+            tmp_reward += result[0] * 100 - result[1] * 100
+            # remove the future from the future_to_stream_index
+            del self.future_to_stream_index[future]
 
         current_time_ms: float = time.time() * 1000
         for task_id, queue in self.task_queues.items():
@@ -499,15 +500,9 @@ class DLSchedulingEnv(gym.Env):
             "variant_accuracies": self.variant_accuracies,
             "gpu_resources": gpu_resources,
         }
-        reward: float = (
-            tmp_reward
-            + (self.streamResults[0][0] * 100 if self.stream_status[0] else 0)
-            + (self.streamResults[1][0] * 100 if self.stream_status[1] else 0)
-            - (self.streamResults[0][1] * 100 if self.stream_status[0] else 0)
-            - (self.streamResults[1][1] * 100 if self.stream_status[1] else 0)
-            + 50
-            * (gpu_resources[0] + gpu_resources[1])  # encourage to use GPU resources
-        )
+        reward: float = tmp_reward + 50 * (
+            gpu_resources[0] + gpu_resources[1]
+        )  # encourage to use GPU resources
         done: bool = current_time_ms - self.start_time >= self.total_time_ms
         info: Dict[str, Any] = {}
 
