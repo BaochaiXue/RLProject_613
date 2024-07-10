@@ -3,7 +3,6 @@ import gym
 from gym import spaces
 import torch
 import concurrent.futures
-import subprocess
 import pandas as pd
 import numpy as np
 import typing
@@ -26,27 +25,15 @@ import sys
 import contextlib
 
 
-@contextlib.contextmanager
-def suppress_stdout():
-    with open(os.devnull, "w") as devnull:
-        old_stdout = sys.stdout
-        sys.stdout = devnull
-        try:
-            yield
-        finally:
-            sys.stdout = old_stdout
-
-
-def load_single_test_image(vit_16_using: bool) -> DataLoader:
+def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
     """
-    Loads a single test image from the CIFAR10 dataset, applies transformations,
-    and returns it as a DataLoader object.
+    Loads the CIFAR-10 test set, applies transformations, and returns it as a DataLoader object.
 
     Parameters:
         vit_16_using (bool): Flag indicating whether ViT-16 is being used.
 
     Returns:
-        DataLoader: DataLoader object containing the transformed single test image.
+        DataLoader: DataLoader object containing the transformed CIFAR-10 test set.
     """
     if vit_16_using:
         transform: transforms.Compose = transforms.Compose(
@@ -68,10 +55,31 @@ def load_single_test_image(vit_16_using: bool) -> DataLoader:
             ]
         )
 
-    with suppress_stdout():
-        testset: datasets.CIFAR10 = datasets.CIFAR10(
-            root="./data", train=False, download=True, transform=transform
-        )
+    testset: datasets.CIFAR10 = datasets.CIFAR10(
+        root="./data", train=False, transform=transform, download=True
+    )
+    return testset
+
+
+testset_non_vit: datasets.CIFAR10 = load_testset(False)
+testset_vit: datasets.CIFAR10 = load_testset(True)
+
+
+def load_single_test_image(vit_16_using: bool) -> DataLoader:
+    """
+    Loads a single test image from the CIFAR10 dataset, applies transformations,
+    and returns it as a DataLoader object.
+
+    Parameters:
+        vit_16_using (bool): Flag indicating whether ViT-16 is being used.
+
+    Returns:
+        DataLoader: DataLoader object containing the transformed single test image.
+    """
+    if vit_16_using:
+        testset: datasets.CIFAR10 = testset_vit
+    else:
+        testset: datasets.CIFAR10 = testset_non_vit
     random_index: int = random.randint(0, len(testset) - 1)
     test_subset: Subset = Subset(testset, [random_index])
     testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
@@ -143,6 +151,10 @@ class DLSchedulingEnv(gym.Env):
         self.start_time: float = time.time() * 1000
         self.initialize_parameters()
         self.define_spaces()
+        self.total_tasks_count: List[int] = [0] * self.num_tasks
+        self.total_task_actual_inference: List[int] = [0] * self.num_tasks
+        self.total_task_accurate: List[int] = [0] * self.num_tasks
+        self.total_missed_deadlines: List[int] = [0] * self.num_tasks
         self.task_queues: Dict[int, List[Dict[str, Any]]] = self.generate_task_queues()
         self.current_task_pointer: Dict[int, int] = {
             task_id: 0 for task_id in range(self.num_tasks)
@@ -159,9 +171,7 @@ class DLSchedulingEnv(gym.Env):
             concurrent.futures.ThreadPoolExecutor(max_workers=2)
         )
         self.lock: threading.Lock = threading.Lock()
-        self.total_task_finished: List[int] = [0] * self.num_tasks
-        self.total_task_accurate: List[int] = [0] * self.num_tasks
-        self.total_missed_deadlines: List[int] = [0] * self.num_tasks
+
         self.future_to_stream_index: Dict[concurrent.futures.Future, int] = {}
         self.futures: List[concurrent.futures.Future] = []
         self.streams: List[torch.cuda.Stream] = [
@@ -202,6 +212,7 @@ class DLSchedulingEnv(gym.Env):
                     )
                     current_time += inter_arrival_time
             task_queues[task_id] = task_queue
+            self.total_tasks_count[task_id] = len(task_queue)
         return task_queues
 
     def initialize_parameters(self) -> None:
@@ -306,6 +317,8 @@ class DLSchedulingEnv(gym.Env):
                     and queue[self.current_task_pointer[task_id]]["deadline"]
                     <= current_time_ms - self.start_time
                 ):
+                    # missed deadline
+                    self.total_missed_deadlines[task_id] += 1
                     self.current_task_pointer[task_id] += 1
                 if (
                     self.current_task_pointer[task_id] < len(queue)
@@ -342,7 +355,9 @@ class DLSchedulingEnv(gym.Env):
             "variant_accuracies": self.variant_accuracies.astype(np.float32),
             "gpu_resources": np.array(get_gpu_resources(), dtype=np.float32),
         }
-
+        for key, value in initial_observation.items():
+            if np.any(np.isnan(value)):
+                raise ValueError(f"NaN detected in initial observation: {key}")
         return initial_observation
 
     def execute_task(
@@ -389,7 +404,7 @@ class DLSchedulingEnv(gym.Env):
             finish_time: float = time.time() * 1000
             # Update the total task finished and accuracy counts
             with self.lock:
-                self.total_task_finished[task_id] += 1
+                self.total_task_actual_inference[task_id] += 1
                 if correct == 1:
                     self.total_task_accurate[task_id] += 1
                 if finish_time - self.start_time > deadline:
@@ -489,6 +504,8 @@ class DLSchedulingEnv(gym.Env):
                     and queue[self.current_task_pointer[task_id]]["deadline"]
                     <= current_time_ms - self.start_time
                 ):
+                    # missed deadline
+                    self.total_missed_deadlines[task_id] += 1
                     self.current_task_pointer[task_id] += 1
                 if (
                     self.current_task_pointer[task_id] < len(queue)
@@ -530,7 +547,14 @@ class DLSchedulingEnv(gym.Env):
         )  # encourage to use GPU resources
         done: bool = current_time_ms - self.start_time >= self.total_time_ms
         info: Dict[str, Any] = {}
+        # Ensure no NaN values in the observation
+        for key, value in observation.items():
+            if np.any(np.isnan(value)):
+                raise ValueError(f"NaN detected in observation after step: {key}")
 
+        # Ensure no NaN values in the reward
+        if np.isnan(reward):
+            raise ValueError("NaN detected in reward after step")
         return observation, reward, done, info
 
     def close(self) -> None:
@@ -556,7 +580,24 @@ if __name__ == "__main__":
     # Wrap the environment to use vectorized environments, which is required by stable-baselines3
     env = make_vec_env(lambda: env, n_envs=1)
 
-    # Define a callback to evaluate and stop training once a reward threshold is achieved
+    # Set up the logger
+
+    # Automatically select an available GPU
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    # Initialize the PPO model with gradient clipping
+    model = PPO(
+        "MultiInputPolicy",
+        env,
+        verbose=1,
+        tensorboard_log="./logs/",
+        device=device,
+        learning_rate=3e-4,  # Reduced learning rate
+        clip_range=0.2,  # PPO clip range
+        ent_coef=0.01,  # Entropy coefficient for exploration
+        vf_coef=0.5,  # Value function coefficient for the loss
+        max_grad_norm=0.5,  # Gradient clipping
+    )
     eval_callback = EvalCallback(
         env,
         best_model_save_path="./logs/",
@@ -565,15 +606,6 @@ if __name__ == "__main__":
         deterministic=True,
         render=False,
     )
-
-    # Automatically select an available GPU
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-    # Initialize the PPO model
-    model = PPO(
-        "MultiInputPolicy", env, verbose=1, tensorboard_log="./logs/", device=device
-    )
-
     # Train the model
     model.learn(total_timesteps=100000, callback=eval_callback)
 
@@ -588,3 +620,13 @@ if __name__ == "__main__":
     for _ in range(1000):
         action, _states = model.predict(obs, deterministic=True)
         obs, rewards, dones, info = env.step(action)
+        if dones:
+            # record the DDL miss rate and accuracy
+            total_task_finished = np.sum(env.total_tasks_count)
+            total_task_accurate = np.sum(env.total_task_accurate)
+            total_missed_deadlines = np.sum(env.total_missed_deadlines)
+            ddl_miss_rate = total_missed_deadlines / total_task_finished
+            accuracy = total_task_accurate / total_task_finished
+            print(f"DDL Miss Rate: {ddl_miss_rate}")
+            print(f"Accuracy: {accuracy}")
+            obs = env.reset()
