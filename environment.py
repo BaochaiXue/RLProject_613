@@ -434,25 +434,25 @@ class DLSchedulingEnv(gym.Env):
         tmp_reward: float = 0.0
         # check if the task has arrived
         if if_first_action_is_idle and if_second_action_is_idle:
-            tmp_reward -= 50  # penalty for selecting two idle actions
+            tmp_reward -= 0.5  # penalty for selecting two idle actions
         if not if_first_action_is_idle and not self.task_arrived[task1_id]:
-            tmp_reward -= 100  # penalty for selecting a task that has not arrived
+            tmp_reward -= 1  # penalty for selecting a task that has not arrived
         if not if_second_action_is_idle and not self.task_arrived[task2_id]:
-            tmp_reward -= 100  # penalty for selecting a task that has not arrived
+            tmp_reward -= 1  # penalty for selecting a task that has not arrived
         # check if select action for busy stream
         if not if_first_action_is_idle and self.stream_status[0]:
-            tmp_reward -= 100  # penalty for selecting a task for busy stream
+            tmp_reward -= 1  # penalty for selecting a task for busy stream
         if not if_second_action_is_idle and self.stream_status[1]:
-            tmp_reward -= 100  # penalty for selecting a task for busy stream
+            tmp_reward -= 1  # penalty for selecting a task for busy stream
         # check if the task has finished
         if not if_first_action_is_idle and self.current_task_pointer[task1_id] >= len(
             self.task_queues[task1_id]
         ):
-            tmp_reward -= 100  # penalty for selecting a task that has finished
+            tmp_reward -= 1  # penalty for selecting a task that has finished
         if not if_second_action_is_idle and self.current_task_pointer[task2_id] >= len(
             self.task_queues[task2_id]
         ):
-            tmp_reward -= 100  # penalty for selecting a task that has finished
+            tmp_reward -= 1  # penalty for selecting a task that has finished
         if (
             not self.stream_status[0]
             and not if_first_action_is_idle
@@ -506,7 +506,7 @@ class DLSchedulingEnv(gym.Env):
             self.stream_status[stream_index] = False
             self.futures.remove(future)
             # Update the reward based on the result
-            tmp_reward += result[0] * 100 - result[1] * 100
+            tmp_reward += result[0] - result[1] / 100
             # remove the future from the future_to_stream_index
             del self.future_to_stream_index[future]
 
@@ -520,13 +520,18 @@ class DLSchedulingEnv(gym.Env):
                     <= current_time_ms - self.start_time
                 ):
                     # missed deadline
+
+                    tmp_reward -= (
+                        10
+                        * (
+                            current_time_ms
+                            - self.start_time
+                            - queue[self.current_task_pointer[task_id]]["deadline"]
+                        )
+                        / 100
+                    )
                     self.total_missed_deadlines[task_id] += 1
                     self.current_task_pointer[task_id] += 1
-                    tmp_reward -= 1000 * (
-                        current_time_ms
-                        - self.start_time
-                        - queue[self.current_task_pointer[task_id]]["deadline"]
-                    )
                 if (
                     self.current_task_pointer[task_id] < len(queue)
                     and queue[self.current_task_pointer[task_id]]["start_time"]
@@ -563,7 +568,7 @@ class DLSchedulingEnv(gym.Env):
             "variant_accuracies": self.variant_accuracies.astype(np.float32),
             "gpu_resources": np.array(gpu_resources, dtype=np.float32),
         }
-        reward: float = tmp_reward + 50 * (
+        reward: float = tmp_reward + 0.5 * (
             gpu_resources[0] + gpu_resources[1]
         )  # encourage to use GPU resources
         done: bool = (current_time_ms - self.start_time) >= self.total_time_ms
