@@ -1,12 +1,12 @@
 import json
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 import torch
 import concurrent.futures
 import pandas as pd
 import numpy as np
 import typing
-from typing import Dict, List, Any, Callable, Tuple
+from typing import Dict, List, Any, Callable, Tuple, Set
 import time
 import GPUtil
 import os
@@ -15,28 +15,18 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from torch import nn
 import threading
-from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.callbacks import (
-    EvalCallback,
-    StopTrainingOnRewardThreshold,
-)
-import sys
-import contextlib
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
+from sb3_contrib.common.maskable.utils import get_action_masks
+from sb3_contrib.common.wrappers import ActionMasker
+
+debug_count: int = 1
 
 
 def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
-    """
-    Loads the CIFAR-10 test set, applies transformations, and returns it as a DataLoader object.
-
-    Parameters:
-        vit_16_using (bool): Flag indicating whether ViT-16 is being used.
-
-    Returns:
-        DataLoader: DataLoader object containing the transformed CIFAR-10 test set.
-    """
-    if vit_16_using:
-        transform: transforms.Compose = transforms.Compose(
+    transform = (
+        transforms.Compose(
             [
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
@@ -45,8 +35,8 @@ def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
                 ),
             ]
         )
-    else:
-        transform: transforms.Compose = transforms.Compose(
+        if vit_16_using
+        else transforms.Compose(
             [
                 transforms.ToTensor(),
                 transforms.Normalize(
@@ -54,6 +44,7 @@ def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
                 ),
             ]
         )
+    )
 
     testset: datasets.CIFAR10 = datasets.CIFAR10(
         root="./data", train=False, transform=transform, download=True
@@ -66,20 +57,7 @@ testset_vit: datasets.CIFAR10 = load_testset(True)
 
 
 def load_single_test_image(vit_16_using: bool) -> DataLoader:
-    """
-    Loads a single test image from the CIFAR10 dataset, applies transformations,
-    and returns it as a DataLoader object.
-
-    Parameters:
-        vit_16_using (bool): Flag indicating whether ViT-16 is being used.
-
-    Returns:
-        DataLoader: DataLoader object containing the transformed single test image.
-    """
-    if vit_16_using:
-        testset: datasets.CIFAR10 = testset_vit
-    else:
-        testset: datasets.CIFAR10 = testset_non_vit
+    testset: datasets.CIFAR10 = testset_vit if vit_16_using else testset_non_vit
     random_index: int = random.randint(0, len(testset) - 1)
     test_subset: Subset = Subset(testset, [random_index])
     testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
@@ -87,16 +65,6 @@ def load_single_test_image(vit_16_using: bool) -> DataLoader:
 
 
 def load_model(model_name: str, model_number: int) -> nn.Module:
-    """
-    Loads a pre-trained model from the specified path.
-
-    Parameters:
-        model_name (str): Name of the model to be loaded.
-        model_number (int): Specific number of the model variant.
-
-    Returns:
-        nn.Module: Loaded model.
-    """
     model_file: str = f"selected_models/{model_name}/{model_name}_{model_number}.pth"
     if not os.path.exists(model_file):
         raise FileNotFoundError(f"Model file {model_file} not found.")
@@ -105,27 +73,10 @@ def load_model(model_name: str, model_number: int) -> nn.Module:
 
 
 def get_gpu_resources() -> Tuple[float, float]:
-    """
-    Retrieves the GPU utility rate and GPU memory utility rate of all GPUs.
-
-    Returns:
-        Tuple[float, float]: A tuple containing the average GPU utility rate and
-                            the average GPU memory utility rate of all GPUs.
-    """
-    # Retrieve a list of all GPUs
     gpus: List[GPUtil.GPU] = GPUtil.getGPUs()
+    total_gpu_util: float = sum(gpu.load for gpu in gpus)
+    total_mem_util: float = sum(gpu.memoryUtil for gpu in gpus)
 
-    # Initialize variables to store the sum of utility rates
-    total_gpu_util: float = 0.0
-    total_mem_util: float = 0.0
-
-    # Iterate over all available GPUs
-    gpu: GPUtil.GGPU
-    for gpu in gpus:
-        total_gpu_util += gpu.load
-        total_mem_util += gpu.memoryUtil
-
-    # Calculate the average utility rates
     num_gpus: int = len(gpus)
     avg_gpu_util: float = total_gpu_util / num_gpus if num_gpus > 0 else 0.0
     avg_mem_util: float = total_mem_util / num_gpus if num_gpus > 0 else 0.0
@@ -135,13 +86,6 @@ def get_gpu_resources() -> Tuple[float, float]:
 
 class DLSchedulingEnv(gym.Env):
     def __init__(self, config_file: str, model_info_file: str) -> None:
-        """
-        Initializes the deep learning scheduling environment.
-
-        Parameters:
-            config_file (str): Path to the configuration file.
-            model_info_file (str): Path to the model information file.
-        """
         super(DLSchedulingEnv, self).__init__()
 
         with open(config_file, "r") as file:
@@ -162,7 +106,7 @@ class DLSchedulingEnv(gym.Env):
         self.if_periodic: List[bool] = [
             task.get("if_periodic", False) for task in self.task_list
         ]
-        self.stream_status: List[bool] = [
+        self.stream_is_busy: List[bool] = [
             False,
             False,
         ]  # False means idle, True means busy
@@ -171,8 +115,6 @@ class DLSchedulingEnv(gym.Env):
             concurrent.futures.ThreadPoolExecutor(max_workers=2)
         )
         self.lock: threading.Lock = threading.Lock()
-
-        self.future_to_stream_index: Dict[concurrent.futures.Future, int] = {}
         self.futures: List[concurrent.futures.Future] = []
         self.streams: List[torch.cuda.Stream] = [
             torch.cuda.Stream(priority=-1),
@@ -180,12 +122,6 @@ class DLSchedulingEnv(gym.Env):
         ]
 
     def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
-        """
-        Generates task queues for all tasks based on their configuration.
-
-        Returns:
-            Dict[int, List[Dict[str, Any]]]: Dictionary containing task queues for each task.
-        """
         task_queues: Dict[int, List[Dict[str, Any]]] = {}
         for task_id, task in enumerate(self.task_list):
             task_queue: List[Dict[str, Any]] = []
@@ -201,7 +137,7 @@ class DLSchedulingEnv(gym.Env):
                     )
                     current_time += period_ms
             else:
-                possion_lambda: float = task["possion_lambda"]
+                possion_lambda: int = task["possion_lambda"]
                 while current_time < self.total_time_ms:
                     inter_arrival_time: int = np.random.poisson(possion_lambda)
                     task_queue.append(
@@ -216,30 +152,36 @@ class DLSchedulingEnv(gym.Env):
         return task_queues
 
     def initialize_parameters(self) -> None:
-        """
-        Initializes the parameters for the environment based on the configuration file.
-        """
         self.num_tasks: int = self.config["num_tasks"]
         self.num_variants: int = self.config["num_variants"]
         self.total_time_ms: int = self.config["total_time_ms"]
         self.task_list: List[Dict[str, Any]] = self.config["task_list"]
-
+        highest_priodic: int = max(
+            [
+                task["period_ms"]
+                for task in self.task_list
+                if task.get("if_periodic", False)
+            ]
+        )
+        highest_deadline: int = max(
+            [
+                task["deadline_ms"]
+                for task in self.task_list
+                if not task.get("if_periodic")
+            ]
+        )
+        self.max_deadline: int = max(highest_priodic, highest_deadline)
         self.variant_runtimes, self.variant_accuracies = self._extract_variant_info()
 
     def _extract_variant_info(self) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Extracts variant runtime and accuracy information from the model information file.
-
-        Returns:
-            Tuple[np.ndarray, np.ndarray]: Tuple containing numpy arrays of variant runtimes and accuracies.
-        """
         runtime_dict: Dict[str, List[float]] = {}
         accuracy_dict: Dict[str, List[float]] = {}
+        column_max: float = self.model_info["Inference Time (s)"].max()
         for _, row in self.model_info.iterrows():
             model_name: str = row["Model Name"]
             variant_id: int = int(row["Model Number"]) - 1
-            runtime: float = row["Inference Time (s)"] * 1000
-            accuracy: float = row["Accuracy (Percentage)"]
+            runtime: float = row["Inference Time (s)"] / column_max
+            accuracy: float = row["Accuracy (Percentage)"] / 100
             if model_name not in runtime_dict:
                 runtime_dict[model_name] = [None] * self.num_variants
                 accuracy_dict[model_name] = [None] * self.num_variants
@@ -255,15 +197,12 @@ class DLSchedulingEnv(gym.Env):
         return np.array(runtimes), np.array(accuracies)
 
     def define_spaces(self) -> None:
-        """
-        Defines the action and observation spaces for the environment.
-        """
         self.action_space: spaces.MultiDiscrete = spaces.MultiDiscrete(
             [
                 self.num_tasks + 1,
-                self.num_variants,
                 self.num_tasks + 1,
-                self.num_variants,
+                self.num_tasks + 1,
+                self.num_tasks + 1,
             ]
         )
 
@@ -271,19 +210,22 @@ class DLSchedulingEnv(gym.Env):
             {
                 "current_streams_status": spaces.MultiBinary(2),
                 "task_deadlines": spaces.Box(
-                    low=0, high=float("inf"), shape=(self.num_tasks,), dtype=np.float32
+                    low=0,
+                    high=self.total_time_ms,
+                    shape=(self.num_tasks,),
+                    dtype=np.float32,
                 ),
                 "task_if_arrived": spaces.MultiBinary(self.num_tasks),
                 "task_if_periodic": spaces.MultiBinary(self.num_tasks),
                 "variant_runtimes": spaces.Box(
                     low=0,
-                    high=float("inf"),
+                    high=1,
                     shape=(self.num_tasks, self.num_variants),
                     dtype=np.float32,
                 ),
                 "variant_accuracies": spaces.Box(
                     low=0,
-                    high=100,
+                    high=1,
                     shape=(self.num_tasks, self.num_variants),
                     dtype=np.float32,
                 ),
@@ -293,28 +235,34 @@ class DLSchedulingEnv(gym.Env):
             }
         )
 
-    def reset(self) -> Dict[str, Any]:
-        """
-        Resets the environment to its initial state.
+    def validate_observation(self, observation: Dict[str, Any]) -> None:
+        for key, value in observation.items():
+            if np.any(np.isnan(value)):
+                raise ValueError(f"NaN detected in observation: {key}")
 
-        Returns:
-            Dict[str, Any]: Initial observation of the environment.
-        """
+    def validate_reward(self, reward: float) -> None:
+        if np.isnan(reward):
+            raise ValueError("NaN detected in reward")
+
+    def reset(
+        self, *, seed: int | None = None, options: dict[str, Any] | None = None
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        if seed is not None:
+            np.random.seed(seed)
+            random.seed(seed)
+
         self.current_task_pointer = {task_id: 0 for task_id in range(self.num_tasks)}
-        self.task_start_times: Dict[int, float] = {}
-        self.task_end_times: Dict[int, float] = {}
         self.start_time = time.time() * 1000
-        task_if_arrived = np.zeros(self.num_tasks, dtype=np.float32)
-        current_time_ms: float = time.time() * 1000
+        task_if_arrived = [False] * self.num_tasks
+        current_time_ms = time.time() * 1000
         for task_id, queue in self.task_queues.items():
             if self.current_task_pointer[task_id] < len(queue):
-                if_task_available: bool = False
+                if_task_available = False
                 while (
                     self.current_task_pointer[task_id] < len(queue)
                     and queue[self.current_task_pointer[task_id]]["deadline"]
                     <= current_time_ms - self.start_time
                 ):
-                    # missed deadline
                     self.total_missed_deadlines[task_id] += 1
                     self.current_task_pointer[task_id] += 1
                 if (
@@ -322,14 +270,15 @@ class DLSchedulingEnv(gym.Env):
                     and queue[self.current_task_pointer[task_id]]["start_time"]
                     <= current_time_ms - self.start_time
                 ):
-                    task_if_arrived[task_id] = 1
+                    task_if_arrived[task_id] = True
                     if_task_available = True
                 if not if_task_available:
-                    task_if_arrived[task_id] = 0
+                    task_if_arrived[task_id] = False
             else:
-                task_if_arrived[task_id] = 0
+                task_if_arrived[task_id] = False
+        task_if_arrived = np.array(task_if_arrived)
         self.task_arrived = task_if_arrived
-        task_ddls: List[float] = []
+        task_ddls = []
         for task_id, queue in self.task_queues.items():
             if (
                 self.current_task_pointer[task_id] < len(queue)
@@ -341,51 +290,38 @@ class DLSchedulingEnv(gym.Env):
                 )
             else:
                 task_ddls.append(-float("inf"))
-        initial_observation: Dict[str, Any] = {
+        initial_observation = {
             "current_streams_status": np.array([0, 0], dtype=np.float32),
-            "task_deadlines": np.array(  # remaining time to deadline
-                task_ddls,
-                dtype=np.float32,
-            ),
-            "task_if_arrived": task_if_arrived,
+            "task_deadlines": np.array(task_ddls, dtype=np.float32),
+            "task_if_arrived": task_if_arrived.astype(np.float32),
             "task_if_periodic": np.array(self.if_periodic, dtype=np.float32),
             "variant_runtimes": self.variant_runtimes.astype(np.float32),
             "variant_accuracies": self.variant_accuracies.astype(np.float32),
             "gpu_resources": np.array(get_gpu_resources(), dtype=np.float32),
         }
-        for key, value in initial_observation.items():
-            if np.any(np.isnan(value)):
-                raise ValueError(f"NaN detected in initial observation: {key}")
-        return initial_observation
+        self.validate_observation(initial_observation)
+        info = {}
+        return initial_observation, info
 
     def execute_task(
         self,
         task: Dict[str, Any],
         task_id: int,
         variant_id: int,
-        stream_index: int,  # 0 or 1
+        stream_index: int,
         deadline: float,
     ) -> Tuple[int, int]:
-        """
-        Executes a given task on a specified stream.
-
-        Parameters:
-            task (Dict[str, Any]): The task to be executed.
-            task_id (int): The ID of the task.
-            variant_id (int): The variant ID of the task.
-            stream_index (int): The index of the stream (0 or 1).
-            deadline (float): The deadline for the task.
-
-        Returns:
-            Tuple[int, int]: Result of the task execution indicating correctness and penalty.
-        """
+        if debug_count % 1431 == 0:
+            print(f"Stream Status: {self.stream_is_busy}")
+            print(f"Task Arrived: {self.task_arrived}")
+            print(f"Task Pointer: {self.current_task_pointer}")
+            debug_count += 1
         model: nn.Module = load_model(task["model"], variant_id + 1)
         dataloader: DataLoader = load_single_test_image("vit" in task["model"])
         device: torch.device = torch.device(
             f"cuda:0" if torch.cuda.is_available() else "cpu"
         )
         stream: torch.cuda.Stream = self.streams[stream_index]
-        self.task_arrived[task_id] = False
         penalty_function: Callable[[float], float] = lambda x: x * 10 if x > 0 else x
 
         with torch.cuda.stream(stream):
@@ -395,72 +331,68 @@ class DLSchedulingEnv(gym.Env):
             with torch.no_grad():
                 for images, labels in dataloader:
                     images, labels = images.to(device), labels.to(device)
-                    outputs = model(images)
+                    outputs: torch.Tensor = model(images)
+                    predicted: torch.Tensor
                     _, predicted = torch.max(outputs.data, 1)
                     correct += (predicted == labels).sum().item()
             finish_time: float = time.time() * 1000
-            # Update the total task finished and accuracy counts
             with self.lock:
                 self.total_task_actual_inference[task_id] += 1
                 if correct == 1:
                     self.total_task_accurate[task_id] += 1
                 if finish_time - self.start_time > deadline:
                     self.total_missed_deadlines[task_id] += 1
-        return (
-            correct,
-            penalty_function(finish_time - self.start_time - deadline),
+        self.stream_is_busy[stream_index] = False
+        return correct, penalty_function(
+            (finish_time - self.start_time - deadline) / self.max_deadline
         )
 
     def step(
         self, action: np.ndarray
     ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
-        """
-        Executes a step in the environment based on the provided action.
-
-        Parameters:
-            action (np.ndarray): Array containing the actions to be performed.
-
-        Returns:
-            Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
-                - Observation after performing the action.
-                - Reward obtained.
-                - Boolean indicating if the episode is done.
-                - Additional information.
-        """
+        task1_id: int
+        variant1_id: int
+        task2_id: int
+        variant2_id: int
         task1_id, variant1_id, task2_id, variant2_id = action
-
+        variant1_id %= self.num_variants
+        variant2_id %= self.num_variants
         if_first_action_is_idle: bool = task1_id == self.num_tasks
         if_second_action_is_idle: bool = task2_id == self.num_tasks
         tmp_reward: float = 0.0
-        # check if the task has arrived
+        if (
+            task1_id == task2_id
+            and not if_first_action_is_idle
+            and not if_second_action_is_idle
+        ):
+            tmp_reward -= 100  # penalty for selecting the same task
         if if_first_action_is_idle and if_second_action_is_idle:
-            tmp_reward -= 0.5  # penalty for selecting two idle actions
+            tmp_reward -= 0.1
         if not if_first_action_is_idle and not self.task_arrived[task1_id]:
-            tmp_reward -= 1  # penalty for selecting a task that has not arrived
+            tmp_reward -= 1
         if not if_second_action_is_idle and not self.task_arrived[task2_id]:
-            tmp_reward -= 1  # penalty for selecting a task that has not arrived
-        # check if select action for busy stream
-        if not if_first_action_is_idle and self.stream_status[0]:
-            tmp_reward -= 1  # penalty for selecting a task for busy stream
-        if not if_second_action_is_idle and self.stream_status[1]:
-            tmp_reward -= 1  # penalty for selecting a task for busy stream
-        # check if the task has finished
+            tmp_reward -= 1
+        if not if_first_action_is_idle and self.stream_is_busy[0]:
+            tmp_reward -= 1
+        if not if_second_action_is_idle and self.stream_is_busy[1]:
+            tmp_reward -= 1
         if not if_first_action_is_idle and self.current_task_pointer[task1_id] >= len(
             self.task_queues[task1_id]
         ):
-            tmp_reward -= 1  # penalty for selecting a task that has finished
+            tmp_reward -= 1
         if not if_second_action_is_idle and self.current_task_pointer[task2_id] >= len(
             self.task_queues[task2_id]
         ):
-            tmp_reward -= 1  # penalty for selecting a task that has finished
+            tmp_reward -= 1
         if (
-            not self.stream_status[0]
+            not self.stream_is_busy[0]
             and not if_first_action_is_idle
             and self.task_arrived[task1_id]
             and self.current_task_pointer[task1_id] < len(self.task_queues[task1_id])
         ):
-            self.stream_status[0] = True
-            future = self.executor.submit(
+            self.stream_is_busy[0] = True
+            self.task_arrived[task1_id] = False
+            future: concurrent.futures.Future = self.executor.submit(
                 self.execute_task,
                 self.task_list[task1_id],
                 task1_id,
@@ -472,16 +404,16 @@ class DLSchedulingEnv(gym.Env):
             )
             self.current_task_pointer[task1_id] += 1
             self.futures.append(future)
-            self.future_to_stream_index[future] = 0
 
         if (
-            not self.stream_status[1]
+            not self.stream_is_busy[1]
             and not if_second_action_is_idle
             and self.task_arrived[task2_id]
             and self.current_task_pointer[task2_id] < len(self.task_queues[task2_id])
         ):
-            self.stream_status[1] = True
-            future = self.executor.submit(
+            self.stream_is_busy[1] = True
+            self.task_arrived[task2_id] = False
+            future: concurrent.futures.Future = self.executor.submit(
                 self.execute_task,
                 self.task_list[task2_id],
                 task2_id,
@@ -493,22 +425,16 @@ class DLSchedulingEnv(gym.Env):
             )
             self.current_task_pointer[task2_id] += 1
             self.futures.append(future)
-            self.future_to_stream_index[future] = 1
 
-        # Wait for any of the futures to complete
+        done_futures: Set[concurrent.futures.Future]
         done_futures, _ = concurrent.futures.wait(
             self.futures, return_when=concurrent.futures.FIRST_COMPLETED
         )
 
         for future in done_futures:
-            result: Tuple[int, int] = future.result()
-            stream_index: int = self.future_to_stream_index[future]
-            self.stream_status[stream_index] = False
+            result: Tuple[int, float] = future.result()
             self.futures.remove(future)
-            # Update the reward based on the result
-            tmp_reward += result[0] - result[1] / 100
-            # remove the future from the future_to_stream_index
-            del self.future_to_stream_index[future]
+            tmp_reward += result[0] - result[1]
 
         current_time_ms: float = time.time() * 1000
         for task_id, queue in self.task_queues.items():
@@ -519,17 +445,7 @@ class DLSchedulingEnv(gym.Env):
                     and queue[self.current_task_pointer[task_id]]["deadline"]
                     <= current_time_ms - self.start_time
                 ):
-                    # missed deadline
-
-                    tmp_reward -= (
-                        10
-                        * (
-                            current_time_ms
-                            - self.start_time
-                            - queue[self.current_task_pointer[task_id]]["deadline"]
-                        )
-                        / 100
-                    )
+                    tmp_reward -= 100 / self.max_deadline
                     self.total_missed_deadlines[task_id] += 1
                     self.current_task_pointer[task_id] += 1
                 if (
@@ -557,74 +473,105 @@ class DLSchedulingEnv(gym.Env):
             else:
                 task_ddls.append(-float("inf"))
         observation: Dict[str, Any] = {
-            "current_streams_status": np.array(self.stream_status, dtype=np.float32),
-            "task_deadlines": np.array(
-                task_ddls,
-                dtype=np.float32,
-            ),
+            "current_streams_status": np.array(self.stream_is_busy, dtype=np.float32),
+            "task_deadlines": np.array(task_ddls, dtype=np.float32),
             "task_if_arrived": np.array(self.task_arrived, dtype=np.float32),
             "task_if_periodic": np.array(self.if_periodic, dtype=np.float32),
             "variant_runtimes": self.variant_runtimes.astype(np.float32),
             "variant_accuracies": self.variant_accuracies.astype(np.float32),
             "gpu_resources": np.array(gpu_resources, dtype=np.float32),
         }
-        reward: float = tmp_reward + 0.5 * (
-            gpu_resources[0] + gpu_resources[1]
-        )  # encourage to use GPU resources
-        done: bool = (current_time_ms - self.start_time) >= self.total_time_ms
+        reward: float = tmp_reward + 0.5 * (gpu_resources[0] + gpu_resources[1])
+        # all tasks_pointer reached end of queue, and all tasks are idle
+        done: bool = all(
+            [
+                self.current_task_pointer[task_id] >= len(queue)
+                and not self.task_arrived[task_id]
+                for task_id, queue in self.task_queues.items()
+            ]
+        ) and not any(self.stream_is_busy)
         info: Dict[str, Any] = {}
-        # Ensure no NaN values in the observation
-        for key, value in observation.items():
-            if np.any(np.isnan(value)):
-                raise ValueError(f"NaN detected in observation after step: {key}")
-
-        # Ensure no NaN values in the reward
-        if np.isnan(reward):
-            raise ValueError("NaN detected in reward after step")
-        return observation, reward, done, info
+        self.validate_observation(observation)
+        self.validate_reward(reward)
+        return observation, reward, done, done, info
 
     def close(self) -> None:
-        """
-        Closes the environment and waits for all threads to complete.
-        """
         self.executor.shutdown(wait=True)
-        # clean up the GPU streams
         for stream in self.streams:
             stream.synchronize()
         del self.streams
 
+    def valid_action_mask(self) -> np.ndarray:
+        task_mask1 = (
+            np.array([True] * self.num_tasks + [False])
+            if not self.stream_is_busy[0]
+            else np.array([False] * self.num_tasks + [True])
+        )
+        task_mask2 = (
+            np.array([True] * self.num_tasks + [False])
+            if not self.stream_is_busy[1]
+            else np.array([False] * self.num_tasks + [True])
+        )
+        variant_mask1 = np.array([True] * (self.num_tasks + 1))
+        variant_mask2 = np.array([True] * (self.num_tasks + 1))
+        if self.num_variants < self.num_tasks:
+            variant_mask1[self.num_variants :] = False
+            variant_mask2[self.num_variants :] = False
+        if self.num_variants > self.num_tasks:
+            raise ValueError("Number of variants should be less than or equal to tasks")
+        for i in range(self.num_tasks):
+            if not self.task_arrived[i] or self.current_task_pointer[i] >= len(
+                self.task_queues[i]
+            ):
+                task_mask1[i] = False
+                task_mask2[i] = False
+
+        if not np.any(task_mask1[: self.num_tasks]):
+            task_mask1[self.num_tasks] = True
+            variant_mask1[:] = False
+            variant_mask1[0] = True
+        else:
+            task_mask1[self.num_tasks] = False
+        if not np.any(task_mask2[: self.num_tasks]):
+            task_mask2[self.num_tasks] = True
+            variant_mask2[:] = False
+            variant_mask2[0] = True
+        else:
+            task_mask2[self.num_tasks] = False
+        action_mask = np.array(
+            [task_mask1, variant_mask1, task_mask2, variant_mask2], dtype=np.bool_
+        )
+        return action_mask.astype(np.bool_)
+
 
 if __name__ == "__main__":
-    # Example usage:
     env: DLSchedulingEnv = DLSchedulingEnv(
         config_file="config.json", model_info_file="model_information.csv"
     )
-
-    # Reset the environment to get the initial observation
-    observation: Dict[str, Any] = env.reset()
-
-    # Wrap the environment to use vectorized environments, which is required by stable-baselines3
+    env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
 
-    # Set up the logger
+    device: torch.device = torch.device("cpu")
 
-    # Automatically select an available GPU
-    device = torch.device("cpu")
-
-    # Initialize the PPO model with gradient clipping
-    model = PPO(
+    model: MaskablePPO = MaskablePPO(
         "MultiInputPolicy",
         env,
         verbose=1,
         tensorboard_log="./logs/",
         device=device,
-        learning_rate=3e-4,  # Reduced learning rate
-        clip_range=0.2,  # PPO clip range
-        ent_coef=0.01,  # Entropy coefficient for exploration
-        vf_coef=0.5,  # Value function coefficient for the loss
-        max_grad_norm=0.5,  # Gradient clipping
+        learning_rate=3e-4,
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.01,
+        vf_coef=0.5,
+        max_grad_norm=0.5,
     )
-    eval_callback = EvalCallback(
+
+    eval_callback: MaskableEvalCallback = MaskableEvalCallback(
         env,
         best_model_save_path="./logs/",
         log_path="./logs/",
@@ -632,27 +579,23 @@ if __name__ == "__main__":
         deterministic=True,
         render=False,
     )
-    # Train the model
+
     model.learn(total_timesteps=100000, callback=eval_callback)
-
-    # Save the model
     model.save("ppo_dl_scheduling")
+    model = MaskablePPO.load("ppo_dl_scheduling")
 
-    # Load the model for further use or evaluation
-    model = PPO.load("ppo_dl_scheduling")
-
-    # Evaluate the model
-    obs = env.reset()
+    obs: Dict[str, Any] = env.reset()
     for _ in range(1000):
-        action, _states = model.predict(obs, deterministic=True)
+        action_masks = get_action_masks(env)
+        action: np.ndarray
+        action, _states = model.predict(obs, action_masks=action_masks)
         obs, rewards, dones, info = env.step(action)
         if dones:
-            # record the DDL miss rate and accuracy
-            total_task_finished = np.sum(env.total_tasks_count)
-            total_task_accurate = np.sum(env.total_task_accurate)
-            total_missed_deadlines = np.sum(env.total_missed_deadlines)
-            ddl_miss_rate = total_missed_deadlines / total_task_finished
-            accuracy = total_task_accurate / total_task_finished
+            total_task_finished: int = np.sum(env.total_tasks_count)
+            total_task_accurate: int = np.sum(env.total_task_accurate)
+            total_missed_deadlines: int = np.sum(env.total_missed_deadlines)
+            ddl_miss_rate: float = total_missed_deadlines / total_task_finished
+            accuracy: float = total_task_accurate / total_task_finished
             print(f"DDL Miss Rate: {ddl_miss_rate}")
             print(f"Accuracy: {accuracy}")
             obs = env.reset()
