@@ -18,10 +18,10 @@ import threading
 from stable_baselines3.common.env_util import make_vec_env
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
-from sb3_contrib.common.maskable.utils import get_action_masks
 from sb3_contrib.common.wrappers import ActionMasker
+import pynvml
 
-debug_count: int = 1
+pynvml.nvmlInit()
 
 
 def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
@@ -73,6 +73,73 @@ def load_model(model_name: str, model_number: int) -> nn.Module:
 
 
 def get_gpu_resources() -> Tuple[float, float]:
+    device_count = pynvml.nvmlDeviceGetCount()
+    total_gpu_util = 0
+    total_mem_util = 0
+
+    for i in range(device_count):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        total_gpu_util += util.gpu
+        total_mem_util += mem_info.used / mem_info.total * 100
+
+    avg_gpu_util = total_gpu_util / device_count if device_count > 0 else 0.0
+    avg_mem_util = total_mem_util / device_count if device_count > 0 else 0.0
+
+    return avg_gpu_util / 100.0, avg_mem_util / 100.0
+
+
+def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
+    transform = (
+        transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
+                ),
+            ]
+        )
+        if vit_16_using
+        else transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
+                ),
+            ]
+        )
+    )
+
+    testset: datasets.CIFAR10 = datasets.CIFAR10(
+        root="./data", train=False, transform=transform, download=True
+    )
+    return testset
+
+
+testset_non_vit: datasets.CIFAR10 = load_testset(False)
+testset_vit: datasets.CIFAR10 = load_testset(True)
+
+
+def load_single_test_image(vit_16_using: bool) -> DataLoader:
+    testset: datasets.CIFAR10 = testset_vit if vit_16_using else testset_non_vit
+    random_index: int = random.randint(0, len(testset) - 1)
+    test_subset: Subset = Subset(testset, [random_index])
+    testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
+    return testloader
+
+
+def load_model(model_name: str, model_number: int) -> nn.Module:
+    model_file: str = f"selected_models/{model_name}/{model_name}_{model_number}.pth"
+    if not os.path.exists(model_file):
+        raise FileNotFoundError(f"Model file {model_file} not found.")
+    model: nn.Module = torch.load(model_file)
+    model.to("cuda:0")
+    return model
+
+
+def get_gpu_resources() -> Tuple[float, float]:
     gpus: List[GPUtil.GPU] = GPUtil.getGPUs()
     total_gpu_util: float = sum(gpu.load for gpu in gpus)
     total_mem_util: float = sum(gpu.memoryUtil for gpu in gpus)
@@ -90,7 +157,7 @@ class DLSchedulingEnv(gym.Env):
 
         with open(config_file, "r") as file:
             self.config: Dict[str, Any] = json.load(file)
-
+        self.model_name_set: Set[str] = set()
         self.model_info: pd.DataFrame = pd.read_csv(model_info_file)
         self.start_time: float = time.time() * 1000
         self.initialize_parameters()
@@ -120,6 +187,13 @@ class DLSchedulingEnv(gym.Env):
             torch.cuda.Stream(priority=-1),
             torch.cuda.Stream(priority=0),
         ]
+        self.models: Dict[Tuple[str, int], nn.Module] = {}
+        for model_name in self.model_name_set:
+            for variant_id in range(self.num_variants):
+                self.models[(model_name, variant_id)] = load_model(
+                    model_name, variant_id + 1
+                )
+                self.models[(model_name, variant_id)].to("cuda:0")
 
     def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
         task_queues: Dict[int, List[Dict[str, Any]]] = {}
@@ -179,6 +253,7 @@ class DLSchedulingEnv(gym.Env):
         column_max: float = self.model_info["Inference Time (s)"].max()
         for _, row in self.model_info.iterrows():
             model_name: str = row["Model Name"]
+            self.model_name_set.add(model_name)
             variant_id: int = int(row["Model Number"]) - 1
             runtime: float = row["Inference Time (s)"] / column_max
             accuracy: float = row["Accuracy (Percentage)"] / 100
@@ -215,34 +290,11 @@ class DLSchedulingEnv(gym.Env):
                     shape=(self.num_tasks,),
                     dtype=np.float32,
                 ),
-                "task_if_arrived": spaces.MultiBinary(self.num_tasks),
-                "task_if_periodic": spaces.MultiBinary(self.num_tasks),
-                "variant_runtimes": spaces.Box(
-                    low=0,
-                    high=1,
-                    shape=(self.num_tasks, self.num_variants),
-                    dtype=np.float32,
-                ),
-                "variant_accuracies": spaces.Box(
-                    low=0,
-                    high=1,
-                    shape=(self.num_tasks, self.num_variants),
-                    dtype=np.float32,
-                ),
                 "gpu_resources": spaces.Box(
                     low=0, high=1, shape=(2,), dtype=np.float32
                 ),
             }
         )
-
-    def validate_observation(self, observation: Dict[str, Any]) -> None:
-        for key, value in observation.items():
-            if np.any(np.isnan(value)):
-                raise ValueError(f"NaN detected in observation: {key}")
-
-    def validate_reward(self, reward: float) -> None:
-        if np.isnan(reward):
-            raise ValueError("NaN detected in reward")
 
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
@@ -254,7 +306,7 @@ class DLSchedulingEnv(gym.Env):
         self.current_task_pointer = {task_id: 0 for task_id in range(self.num_tasks)}
         self.start_time = time.time() * 1000
         task_if_arrived = [False] * self.num_tasks
-        current_time_ms = time.time() * 1000
+        current_time_ms = time.time() * 1000 + 1e-6
         for task_id, queue in self.task_queues.items():
             if self.current_task_pointer[task_id] < len(queue):
                 if_task_available = False
@@ -289,17 +341,12 @@ class DLSchedulingEnv(gym.Env):
                     - (current_time_ms - self.start_time)
                 )
             else:
-                task_ddls.append(-float("inf"))
+                task_ddls.append(self.max_deadline * 10)
         initial_observation = {
             "current_streams_status": np.array([0, 0], dtype=np.float32),
             "task_deadlines": np.array(task_ddls, dtype=np.float32),
-            "task_if_arrived": task_if_arrived.astype(np.float32),
-            "task_if_periodic": np.array(self.if_periodic, dtype=np.float32),
-            "variant_runtimes": self.variant_runtimes.astype(np.float32),
-            "variant_accuracies": self.variant_accuracies.astype(np.float32),
             "gpu_resources": np.array(get_gpu_resources(), dtype=np.float32),
         }
-        self.validate_observation(initial_observation)
         info = {}
         return initial_observation, info
 
@@ -311,19 +358,13 @@ class DLSchedulingEnv(gym.Env):
         stream_index: int,
         deadline: float,
     ) -> Tuple[int, int]:
-        global debug_count
-        if debug_count % 1431 == 0:
-            print(f"Stream Status: {self.stream_is_busy}")
-            print(f"Task Arrived: {self.task_arrived}")
-            print(f"Task Pointer: {self.current_task_pointer}")
-            debug_count += 1
-        model: nn.Module = load_model(task["model"], variant_id + 1)
+        model: nn.Module = self.models[(task["model"], variant_id)]
         dataloader: DataLoader = load_single_test_image("vit" in task["model"])
         device: torch.device = torch.device(
             f"cuda:0" if torch.cuda.is_available() else "cpu"
         )
         stream: torch.cuda.Stream = self.streams[stream_index]
-        penalty_function: Callable[[float], float] = lambda x: x * 10 if x > 0 else x
+        penalty_function: Callable[[float], float] = lambda x: x * 5 if x > 0 else x
 
         with torch.cuda.stream(stream):
             model.eval()
@@ -366,7 +407,7 @@ class DLSchedulingEnv(gym.Env):
             and not if_first_action_is_idle
             and not if_second_action_is_idle
         ):
-            tmp_reward -= 100  # penalty for selecting the same task
+            tmp_reward -= 10  # penalty for selecting the same task
         if if_first_action_is_idle and if_second_action_is_idle:
             tmp_reward -= 0.1
         if not if_first_action_is_idle and not self.task_arrived[task1_id]:
@@ -446,7 +487,7 @@ class DLSchedulingEnv(gym.Env):
                     and queue[self.current_task_pointer[task_id]]["deadline"]
                     <= current_time_ms - self.start_time
                 ):
-                    tmp_reward -= 100 / self.max_deadline
+                    tmp_reward -= 50 / self.max_deadline
                     self.total_missed_deadlines[task_id] += 1
                     self.current_task_pointer[task_id] += 1
                 if (
@@ -472,14 +513,10 @@ class DLSchedulingEnv(gym.Env):
                     - (current_time_ms - self.start_time)
                 )
             else:
-                task_ddls.append(-float("inf"))
+                task_ddls.append(self.max_deadline * 10)
         observation: Dict[str, Any] = {
             "current_streams_status": np.array(self.stream_is_busy, dtype=np.float32),
             "task_deadlines": np.array(task_ddls, dtype=np.float32),
-            "task_if_arrived": np.array(self.task_arrived, dtype=np.float32),
-            "task_if_periodic": np.array(self.if_periodic, dtype=np.float32),
-            "variant_runtimes": self.variant_runtimes.astype(np.float32),
-            "variant_accuracies": self.variant_accuracies.astype(np.float32),
             "gpu_resources": np.array(gpu_resources, dtype=np.float32),
         }
         reward: float = tmp_reward + 0.5 * (gpu_resources[0] + gpu_resources[1])
@@ -492,8 +529,6 @@ class DLSchedulingEnv(gym.Env):
             ]
         ) and not any(self.stream_is_busy)
         info: Dict[str, Any] = {}
-        self.validate_observation(observation)
-        self.validate_reward(reward)
         return observation, reward, done, done, info
 
     def close(self) -> None:
@@ -544,6 +579,15 @@ class DLSchedulingEnv(gym.Env):
         )
         return action_mask.astype(np.bool_)
 
+    def render(self, mode: str = "human") -> None:
+        total_task_finished: int = np.sum(env.total_tasks_count)
+        total_task_accurate: int = np.sum(env.total_task_accurate)
+        total_missed_deadlines: int = np.sum(env.total_missed_deadlines)
+        ddl_miss_rate: float = total_missed_deadlines / total_task_finished
+        accuracy: float = total_task_accurate / total_task_finished
+        print(f"DDL Miss Rate: {ddl_miss_rate}")
+        print(f"Accuracy: {accuracy}")
+
 
 if __name__ == "__main__":
     env: DLSchedulingEnv = DLSchedulingEnv(
@@ -553,23 +597,13 @@ if __name__ == "__main__":
     env = make_vec_env(lambda: env, n_envs=1)
 
     device: torch.device = torch.device("cpu")
-
     model: MaskablePPO = MaskablePPO(
         "MultiInputPolicy",
         env,
         verbose=1,
         tensorboard_log="./logs/",
         device=device,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=64,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
+        learning_rate=0.0003,
     )
 
     eval_callback: MaskableEvalCallback = MaskableEvalCallback(
@@ -580,23 +614,18 @@ if __name__ == "__main__":
         deterministic=True,
         render=False,
     )
-
+    env.reset()
     model.learn(total_timesteps=100000, callback=eval_callback)
     model.save("ppo_dl_scheduling")
     model = MaskablePPO.load("ppo_dl_scheduling")
-
-    obs: Dict[str, Any] = env.reset()
-    for _ in range(1000):
-        action_masks = get_action_masks(env)
+    env.reset()
+    prediction_time: float = 0.0
+    for i in range(1000):
+        action_masks = env.env_method("valid_action_mask")
         action: np.ndarray
         action, _states = model.predict(obs, action_masks=action_masks)
         obs, rewards, dones, info = env.step(action)
+
         if dones:
-            total_task_finished: int = np.sum(env.total_tasks_count)
-            total_task_accurate: int = np.sum(env.total_task_accurate)
-            total_missed_deadlines: int = np.sum(env.total_missed_deadlines)
-            ddl_miss_rate: float = total_missed_deadlines / total_task_finished
-            accuracy: float = total_task_accurate / total_task_finished
-            print(f"DDL Miss Rate: {ddl_miss_rate}")
-            print(f"Accuracy: {accuracy}")
+            env.render()
             obs = env.reset()
