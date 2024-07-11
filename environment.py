@@ -90,76 +90,17 @@ def get_gpu_resources() -> Tuple[float, float]:
     return avg_gpu_util / 100.0, avg_mem_util / 100.0
 
 
-def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
-    transform = (
-        transforms.Compose(
-            [
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
-                ),
-            ]
-        )
-        if vit_16_using
-        else transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
-                ),
-            ]
-        )
-    )
-
-    testset: datasets.CIFAR10 = datasets.CIFAR10(
-        root="./data", train=False, transform=transform, download=True
-    )
-    return testset
-
-
-testset_non_vit: datasets.CIFAR10 = load_testset(False)
-testset_vit: datasets.CIFAR10 = load_testset(True)
-
-
-def load_single_test_image(vit_16_using: bool) -> DataLoader:
-    testset: datasets.CIFAR10 = testset_vit if vit_16_using else testset_non_vit
-    random_index: int = random.randint(0, len(testset) - 1)
-    test_subset: Subset = Subset(testset, [random_index])
-    testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
-    return testloader
-
-
-def load_model(model_name: str, model_number: int) -> nn.Module:
-    model_file: str = f"selected_models/{model_name}/{model_name}_{model_number}.pth"
-    if not os.path.exists(model_file):
-        raise FileNotFoundError(f"Model file {model_file} not found.")
-    model: nn.Module = torch.load(model_file)
-    model.to("cuda:0")
-    return model
-
-
-def get_gpu_resources() -> Tuple[float, float]:
-    gpus: List[GPUtil.GPU] = GPUtil.getGPUs()
-    total_gpu_util: float = sum(gpu.load for gpu in gpus)
-    total_mem_util: float = sum(gpu.memoryUtil for gpu in gpus)
-
-    num_gpus: int = len(gpus)
-    avg_gpu_util: float = total_gpu_util / num_gpus if num_gpus > 0 else 0.0
-    avg_mem_util: float = total_mem_util / num_gpus if num_gpus > 0 else 0.0
-
-    return avg_gpu_util, avg_mem_util
-
-
 class DLSchedulingEnv(gym.Env):
-    def __init__(self, config_file: str, model_info_file: str) -> None:
+    def __init__(
+        self, config_file: str, model_info_file: str, if_training: bool = False
+    ) -> None:
         super(DLSchedulingEnv, self).__init__()
-
+        self.if_training: bool = if_training
+        self.train_time_record: float = 0.0
         with open(config_file, "r") as file:
             self.config: Dict[str, Any] = json.load(file)
         self.model_name_set: Set[str] = set()
         self.model_info: pd.DataFrame = pd.read_csv(model_info_file)
-        self.start_time: float = time.time() * 1000
         self.initialize_parameters()
         self.define_spaces()
         self.total_tasks_count: List[int] = [0] * self.num_tasks
@@ -194,6 +135,7 @@ class DLSchedulingEnv(gym.Env):
                     model_name, variant_id + 1
                 )
                 self.models[(model_name, variant_id)].to("cuda:0")
+        self.start_time = time.time() * 1000
 
     def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
         task_queues: Dict[int, List[Dict[str, Any]]] = {}
@@ -348,6 +290,8 @@ class DLSchedulingEnv(gym.Env):
             "gpu_resources": np.array(get_gpu_resources(), dtype=np.float32),
         }
         info = {}
+        if self.if_training:
+            self.train_time_record = time.time() * 1000
         return initial_observation, info
 
     def execute_task(
@@ -392,6 +336,18 @@ class DLSchedulingEnv(gym.Env):
     def step(
         self, action: np.ndarray
     ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+        if self.if_training:
+            current_time: float = time.time() * 1000
+            if current_time - self.train_time_record > 30 and not np.isclose(
+                self.train_time_record, 0.0, atol=1e-6
+            ):
+                self.start_time += (
+                    current_time - self.train_time_record
+                )  # we need to adjust the start time
+                self.start_time -= np.random.uniform(
+                    7, 20
+                )  # random value between 7 and 20
+
         task1_id: int
         variant1_id: int
         task2_id: int
@@ -529,6 +485,8 @@ class DLSchedulingEnv(gym.Env):
             ]
         ) and not any(self.stream_is_busy)
         info: Dict[str, Any] = {}
+        if self.if_training:
+            self.train_time_record = time.time() * 1000
         return observation, reward, done, done, info
 
     def close(self) -> None:
@@ -591,7 +549,9 @@ class DLSchedulingEnv(gym.Env):
 
 if __name__ == "__main__":
     env: DLSchedulingEnv = DLSchedulingEnv(
-        config_file="config.json", model_info_file="model_information.csv"
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=True,
     )
     env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
@@ -618,7 +578,15 @@ if __name__ == "__main__":
     model.learn(total_timesteps=100000, callback=eval_callback)
     model.save("ppo_dl_scheduling")
     model = MaskablePPO.load("ppo_dl_scheduling")
-    env.reset()
+    env.close()
+    env = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+    )
+    env = ActionMasker(env, lambda env: env.valid_action_mask())
+    env = make_vec_env(lambda: env, n_envs=1)
+    obs = env.reset()
     prediction_time: float = 0.0
     for i in range(1000):
         action_masks = env.env_method("valid_action_mask")
