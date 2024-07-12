@@ -20,6 +20,8 @@ from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
 from sb3_contrib.common.wrappers import ActionMasker
 import pynvml
+from stable_baselines3.common.callbacks import BaseCallback
+from sb3_contrib.common.maskable.utils import get_action_masks
 
 pynvml.nvmlInit()
 
@@ -122,7 +124,6 @@ class DLSchedulingEnv(gym.Env):
         self.executor: concurrent.futures.ThreadPoolExecutor = (
             concurrent.futures.ThreadPoolExecutor(max_workers=2)
         )
-        self.lock: threading.Lock = threading.Lock()
         self.futures: List[concurrent.futures.Future] = []
         self.streams: List[torch.cuda.Stream] = [
             torch.cuda.Stream(priority=-1),
@@ -136,6 +137,9 @@ class DLSchedulingEnv(gym.Env):
                 )
                 self.models[(model_name, variant_id)].to("cuda:0")
         self.start_time = time.time() * 1000
+        self.locks: List[threading.Lock] = [
+            threading.Lock() for _ in range(self.num_tasks)
+        ]
 
     def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
         task_queues: Dict[int, List[Dict[str, Any]]] = {}
@@ -246,6 +250,14 @@ class DLSchedulingEnv(gym.Env):
             random.seed(seed)
 
         self.current_task_pointer = {task_id: 0 for task_id in range(self.num_tasks)}
+        self.total_tasks_count = [0] * self.num_tasks
+        self.total_task_actual_inference = [0] * self.num_tasks
+        self.total_task_accurate = [0] * self.num_tasks
+        self.total_missed_deadlines = [0] * self.num_tasks
+        self.stream_is_busy = [False, False]
+        self.task_arrived = [False] * self.num_tasks
+        self.task_queues = self.generate_task_queues()
+        self.futures = []
         self.start_time = time.time() * 1000
         task_if_arrived = [False] * self.num_tasks
         current_time_ms = time.time() * 1000 + 1e-6
@@ -308,7 +320,7 @@ class DLSchedulingEnv(gym.Env):
             f"cuda:0" if torch.cuda.is_available() else "cpu"
         )
         stream: torch.cuda.Stream = self.streams[stream_index]
-        penalty_function: Callable[[float], float] = lambda x: x * 5 if x > 0 else x
+        penalty_function: Callable[[float], float] = lambda x: x * 10 if x > 0 else x
 
         with torch.cuda.stream(stream):
             model.eval()
@@ -322,7 +334,7 @@ class DLSchedulingEnv(gym.Env):
                     _, predicted = torch.max(outputs.data, 1)
                     correct += (predicted == labels).sum().item()
             finish_time: float = time.time() * 1000
-            with self.lock:
+            with self.locks[task_id]:
                 self.total_task_actual_inference[task_id] += 1
                 if correct == 1:
                     self.total_task_accurate[task_id] += 1
@@ -362,8 +374,9 @@ class DLSchedulingEnv(gym.Env):
             task1_id == task2_id
             and not if_first_action_is_idle
             and not if_second_action_is_idle
+            and np.sum(self.task_arrived) > 1
         ):
-            tmp_reward -= 10  # penalty for selecting the same task
+            tmp_reward -= 5
         if if_first_action_is_idle and if_second_action_is_idle:
             tmp_reward -= 0.1
         if not if_first_action_is_idle and not self.task_arrived[task1_id]:
@@ -443,7 +456,7 @@ class DLSchedulingEnv(gym.Env):
                     and queue[self.current_task_pointer[task_id]]["deadline"]
                     <= current_time_ms - self.start_time
                 ):
-                    tmp_reward -= 50 / self.max_deadline
+                    tmp_reward -= 10
                     self.total_missed_deadlines[task_id] += 1
                     self.current_task_pointer[task_id] += 1
                 if (
@@ -487,6 +500,10 @@ class DLSchedulingEnv(gym.Env):
         info: Dict[str, Any] = {}
         if self.if_training:
             self.train_time_record = time.time() * 1000
+        # print(f"Task Arrived: {self.task_arrived}")
+        # print(f"ACTION: {action}, REWARD: {reward}")
+        if not self.if_training and done:
+            self.render("human")
         return observation, reward, done, done, info
 
     def close(self) -> None:
@@ -497,22 +514,24 @@ class DLSchedulingEnv(gym.Env):
 
     def valid_action_mask(self) -> np.ndarray:
         task_mask1 = (
-            np.array([True] * self.num_tasks + [False])
+            np.array([True] * self.num_tasks + [False], dtype=np.bool_)
             if not self.stream_is_busy[0]
-            else np.array([False] * self.num_tasks + [True])
+            else np.array([False] * self.num_tasks + [True], dtype=np.bool_)
         )
         task_mask2 = (
-            np.array([True] * self.num_tasks + [False])
+            np.array([True] * self.num_tasks + [False], dtype=np.bool_)
             if not self.stream_is_busy[1]
-            else np.array([False] * self.num_tasks + [True])
+            else np.array([False] * self.num_tasks + [True], dtype=np.bool_)
         )
-        variant_mask1 = np.array([True] * (self.num_tasks + 1))
-        variant_mask2 = np.array([True] * (self.num_tasks + 1))
+        variant_mask1 = np.array([True] * (self.num_tasks + 1), dtype=np.bool_)
+        variant_mask2 = np.array([True] * (self.num_tasks + 1), dtype=np.bool_)
+
         if self.num_variants < self.num_tasks:
             variant_mask1[self.num_variants :] = False
             variant_mask2[self.num_variants :] = False
         if self.num_variants > self.num_tasks:
             raise ValueError("Number of variants should be less than or equal to tasks")
+
         for i in range(self.num_tasks):
             if not self.task_arrived[i] or self.current_task_pointer[i] >= len(
                 self.task_queues[i]
@@ -526,25 +545,46 @@ class DLSchedulingEnv(gym.Env):
             variant_mask1[0] = True
         else:
             task_mask1[self.num_tasks] = False
+
         if not np.any(task_mask2[: self.num_tasks]):
             task_mask2[self.num_tasks] = True
             variant_mask2[:] = False
             variant_mask2[0] = True
         else:
             task_mask2[self.num_tasks] = False
+
         action_mask = np.array(
             [task_mask1, variant_mask1, task_mask2, variant_mask2], dtype=np.bool_
         )
-        return action_mask.astype(np.bool_)
+        return action_mask
 
     def render(self, mode: str = "human") -> None:
-        total_task_finished: int = np.sum(env.total_tasks_count)
-        total_task_accurate: int = np.sum(env.total_task_accurate)
-        total_missed_deadlines: int = np.sum(env.total_missed_deadlines)
+        total_task_finished: int = np.sum(self.total_tasks_count)
+        total_task_accurate: int = np.sum(self.total_task_accurate)
+        total_missed_deadlines: int = np.sum(self.total_missed_deadlines)
         ddl_miss_rate: float = total_missed_deadlines / total_task_finished
         accuracy: float = total_task_accurate / total_task_finished
         print(f"DDL Miss Rate: {ddl_miss_rate}")
         print(f"Accuracy: {accuracy}")
+
+
+class StopTrainingOnTimeLimit(BaseCallback):
+    def __init__(self, time_limit_seconds: int, verbose=0):
+        super(StopTrainingOnTimeLimit, self).__init__(verbose)
+        self.time_limit_seconds = time_limit_seconds
+        self.start_time = None
+
+    def _on_training_start(self) -> None:
+        self.start_time = time.time()
+
+    def _on_step(self) -> bool:
+        if time.time() - self.start_time >= self.time_limit_seconds:
+            print("Time limit reached.")
+            return False  # Returning False stops the training
+        return True
+
+    def _on_training_end(self) -> None:
+        print("Training stopped due to time limit.")
 
 
 if __name__ == "__main__":
@@ -574,8 +614,11 @@ if __name__ == "__main__":
         deterministic=True,
         render=False,
     )
+    stopTrainingOnTimeLimit: StopTrainingOnTimeLimit = StopTrainingOnTimeLimit(1)
     env.reset()
-    model.learn(total_timesteps=100000, callback=eval_callback)
+    model.learn(
+        total_timesteps=100000, callback=[stopTrainingOnTimeLimit, eval_callback]
+    )
     model.save("ppo_dl_scheduling")
     model = MaskablePPO.load("ppo_dl_scheduling")
     env.close()
@@ -587,13 +630,12 @@ if __name__ == "__main__":
     env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
     obs = env.reset()
-    prediction_time: float = 0.0
     for i in range(1000):
-        action_masks = env.env_method("valid_action_mask")
+        action_masks = get_action_masks(env)
         action: np.ndarray
         action, _states = model.predict(obs, action_masks=action_masks)
         obs, rewards, dones, info = env.step(action)
 
         if dones:
-            env.render()
+            env.render("human")
             obs = env.reset()

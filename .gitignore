@@ -5,3 +5,6 @@ model_evaluation.csv
 model_information.csv
 environment_test.ipynb
 logs
+draft.ipynb
+__pycache__/environment.cpython-310.pyc
+ppo_dl_scheduling.zip
