@@ -24,6 +24,8 @@ from stable_baselines3.common.callbacks import BaseCallback
 from sb3_contrib.common.maskable.utils import get_action_masks
 
 pynvml.nvmlInit()
+avg_predict_time: float = 0.001468617820739746 * 1000
+std_predict_time: float = 0.000535014694757007 * 1000
 
 
 def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
@@ -350,15 +352,15 @@ class DLSchedulingEnv(gym.Env):
     ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
         if self.if_training:
             current_time: float = time.time() * 1000
-            if current_time - self.train_time_record > 30 and not np.isclose(
-                self.train_time_record, 0.0, atol=1e-6
+            if (
+                current_time - self.train_time_record
+                > avg_predict_time + std_predict_time * 2
+                and not np.isclose(self.train_time_record, 0.0, atol=1e-6)
             ):
                 self.start_time += (
                     current_time - self.train_time_record
                 )  # we need to adjust the start time
-                self.start_time -= np.random.uniform(
-                    7, 20
-                )  # random value between 7 and 20
+                self.start_time -= np.random.normal(avg_predict_time, std_predict_time)
 
         task1_id: int
         variant1_id: int
@@ -614,7 +616,7 @@ if __name__ == "__main__":
         deterministic=True,
         render=False,
     )
-    stopTrainingOnTimeLimit: StopTrainingOnTimeLimit = StopTrainingOnTimeLimit(1)
+    stopTrainingOnTimeLimit: StopTrainingOnTimeLimit = StopTrainingOnTimeLimit(10)
     env.reset()
     model.learn(
         total_timesteps=100000, callback=[stopTrainingOnTimeLimit, eval_callback]
@@ -630,12 +632,13 @@ if __name__ == "__main__":
     env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
     obs = env.reset()
-    for i in range(1000):
+    for i in range(10000):
         action_masks = get_action_masks(env)
         action: np.ndarray
-        action, _states = model.predict(obs, action_masks=action_masks)
+        action, _states = model.predict(
+            obs, action_masks=action_masks, deterministic=True
+        )
         obs, rewards, dones, info = env.step(action)
 
         if dones:
-            env.render("human")
             obs = env.reset()

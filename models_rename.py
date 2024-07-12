@@ -166,7 +166,7 @@ if __name__ == "__main__":
     directory: str = "selected_models"
     models_name: List[str] = ["vit_b_16", "resnet50", "vgg16", "mobilenet_v3_large"]
 
-    csv_file: str = "model_evaluation.csv"
+    csv_file: str = "model_information.csv"
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     rename_models_and_evaluate(directory, models_name, csv_file, device)
