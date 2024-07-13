@@ -642,6 +642,7 @@ def train_dqn(time_step_of_traning: int) -> None:
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=True,
+        test_name="DQN",
     )
     env = make_vec_env(lambda: env, n_envs=1)
 
@@ -691,6 +692,7 @@ def train_QRDQN(time_step_of_training: int) -> None:
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=True,
+        test_name="QRDQN",
     )
     env = make_vec_env(lambda: env, n_envs=1)
 

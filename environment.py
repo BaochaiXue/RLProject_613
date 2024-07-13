@@ -701,6 +701,7 @@ def train_MaskablePPO(time_step_of_training: int) -> None:
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=True,
+        test_name="MPPO",
     )
     env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
@@ -757,6 +758,7 @@ def train_TRPO(time_step_of_training: int) -> None:
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=True,
+        test_name="TRPO",
     )
     env = make_vec_env(lambda: env, n_envs=1)
 
@@ -799,6 +801,7 @@ def train_PPO(time_step_of_training: int) -> None:
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=True,
+        test_name="PPO",
     )
     env = make_vec_env(lambda: env, n_envs=1)
 
@@ -841,6 +844,7 @@ def train_A2C(time_step_of_training: int) -> None:
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=True,
+        test_name="A2C",
     )
     env = make_vec_env(lambda: env, n_envs=1)
 

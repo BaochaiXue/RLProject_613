@@ -1,5 +1,8 @@
 import subprocess
 from typing import List
+import warnings
+
+warnings.filterwarnings("ignore")
 
 
 def call_script(script_name: str, param: int | None) -> None:
