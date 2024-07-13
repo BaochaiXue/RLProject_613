@@ -8,16 +8,18 @@
             "model": "vgg16",
             "address": "selected_models/vgg16",
             "data": "CIFAR10",
-            "if_periodic": true,
-            "period_ms": 40.333607912063599
+            "if_periodic": false,
+            "possion_lambda": 40,
+            "deadline_ms": 47
         },
         {
             "name": "task2",
             "model": "resnet50",
             "address": "selected_models/resnet50",
             "data": "CIFAR10",
-            "if_periodic": true,
-            "period_ms": 75.447167992591858
+            "if_periodic": false,
+            "possion_lambda": 75,
+            "deadline_ms": 77
         },
         {
             "name": "task3",
@@ -25,7 +27,7 @@
             "address": "selected_models/mobilenet_v3_large",
             "data": "CIFAR10",
             "if_periodic": true,
-            "period_ms": 83.810782885551454
+            "period_ms": 83
         },
         {
             "name": "task4",
@@ -33,7 +35,7 @@
             "address": "selected_models/vit_b_16",
             "data": "CIFAR10",
             "if_periodic": true,
-            "period_ms": 131.327517579340938
+            "period_ms": 131
         },
         {
             "name": "task5",
@@ -42,7 +44,7 @@
             "data": "CIFAR10",
             "if_periodic": false,
             "possion_lambda": 96,
-            "deadline_ms": 98.011201478958128
+            "deadline_ms": 98
         },
         {
             "name": "task6",
@@ -50,8 +52,8 @@
             "address": "selected_models/vit_b_16",
             "data": "CIFAR10",
             "if_periodic": false,
-            "possion_lambda": 93.27517579340938,
-            "deadline_ms": 97.7517579340938
+            "possion_lambda": 93,
+            "deadline_ms": 97
         }
     ]
 }

@@ -24,6 +24,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 from environment import DLSchedulingEnv
 from sb3_contrib.common.maskable.utils import get_action_masks
 import warnings
+from env_detail import DetailedDLSchedulingEnv
 
 warnings.filterwarnings("ignore")
 
@@ -59,6 +60,7 @@ def test_DM():
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=False,
+        test_name="DM",
     )
     obs: np.ndarray
     info: Dict[str, Any]
@@ -89,15 +91,177 @@ def test_DM():
         # time.sleep(0.001)
         if dones:
             obs, info = env.reset()
+    env.close()
 
 
-def test_IM():
-    # IM means inference time monotonic scheduling
-    pass
+def test_DMI():
+    # DM means deadline monotonic scheduling inverted
+    env = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+        test_name="DMI",
+    )
+    obs: np.ndarray
+    info: Dict[str, Any]
+    obs, info = env.reset()
+    for i in range(10000):
+        action: np.ndarray
+        num_tasks: int = env.num_tasks
+        num_variants: int = env.num_variants
+        # we check in the obs
+        # maskable_action = env.valid_action_mask()
+        current_stream_status_is_busy: np.ndarray = obs["current_streams_status"]
+        task_deadlines: np.ndarray = obs["task_deadlines"]
+        biggest_deadline_task_idx: int = np.argmax(task_deadlines)
+        second_biggest_deadline_task_idx: int = np.argmax(
+            np.where(task_deadlines == np.max(task_deadlines), -np.inf, task_deadlines)
+        )
+        if current_stream_status_is_busy[0] and current_stream_status_is_busy[1]:
+            action = np.array([num_tasks, 0, num_tasks, 0])
+        elif current_stream_status_is_busy[0] and not current_stream_status_is_busy[1]:
+            action = np.array([num_tasks, 0, biggest_deadline_task_idx, 0])
+        elif not current_stream_status_is_busy[0] and current_stream_status_is_busy[1]:
+            action = np.array([biggest_deadline_task_idx, 0, num_tasks, 0])
+        else:
+            action = np.array(
+                [biggest_deadline_task_idx, 0, second_biggest_deadline_task_idx, 0]
+            )
+        obs, rewards, dones, tun, info = env.step(action)
+
+        if dones or tun:
+            obs, info = env.reset()
+    env.close()
+
+
+def test_STF():
+    # IM shortest task first
+    env = DetailedDLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+        test_name="STF",
+    )
+    obs: np.ndarray
+    info: Dict[str, Any]
+    obs, info = env.reset()
+    for i in range(10000):
+        action: np.ndarray
+        num_tasks: int = env.num_tasks
+        num_variants: int = env.num_variants
+        # we check in the obs
+        # maskable_action = env.valid_action_mask()
+        current_stream_status_is_busy: np.ndarray = obs["current_streams_status"]
+        infer_time: np.ndarray = obs["infer_time"].copy()
+        if_arrived: np.ndarray = obs["if_arrived"].copy()
+        infer_time = [infer_time[task_id][0] for task_id in range(num_tasks)]
+        if_arrived = [
+            False if np.isclose(if_arrived[task_id], 0) else True
+            for task_id in range(num_tasks)
+        ]
+        # if not arrived, we set the infer time to be inf
+        infer_time = [
+            np.inf if not if_arrived[task_id] else infer_time[task_id]
+            for task_id in range(num_tasks)
+        ]
+        smallest_infer_time_task_idx: int = np.argmin(infer_time)
+        second_smallest_infer_time_task_idx: int = np.argmin(
+            np.where(infer_time == np.min(infer_time), np.inf, infer_time)
+        )
+        if current_stream_status_is_busy[0] and current_stream_status_is_busy[1]:
+            action = np.array([num_tasks, 0, num_tasks, 0])
+        elif current_stream_status_is_busy[0] and not current_stream_status_is_busy[1]:
+            action = np.array([num_tasks, 0, smallest_infer_time_task_idx, 0])
+        elif not current_stream_status_is_busy[0] and current_stream_status_is_busy[1]:
+            action = np.array([smallest_infer_time_task_idx, 0, num_tasks, 0])
+        else:
+            action = np.array(
+                [
+                    smallest_infer_time_task_idx,
+                    0,
+                    second_smallest_infer_time_task_idx,
+                    0,
+                ]
+            )
+        obs, rewards, dones, tun, info = env.step(action)
+
+        if dones or tun:
+            obs, info = env.reset()
+    env.close()
+
+
+def test_FIFO():
+    # FIFO first in first out
+    env = DetailedDLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+        test_name="FIFO",
+    )
+    obs: np.ndarray
+    info: Dict[str, Any]
+    obs, info = env.reset()
+
+    for i in range(10000):
+        action: np.ndarray
+        num_tasks: int = env.num_tasks
+        num_variants: int = env.num_variants
+        # we check in the obs
+        # maskable_action = env.valid_action_mask()
+        current_stream_status_is_busy: np.ndarray = obs["current_streams_status"]
+        task_arrival_time: np.ndarray = obs["start_time"]
+        smallest_arrival_time_task_idx: int = np.argmin(task_arrival_time)
+        second_smallest_arrival_time_task_idx: int = np.argmin(
+            np.where(
+                task_arrival_time == np.min(task_arrival_time),
+                np.inf,
+                task_arrival_time,
+            )
+        )
+        if current_stream_status_is_busy[0] and current_stream_status_is_busy[1]:
+            action = np.array([num_tasks, 0, num_tasks, 0])
+        elif current_stream_status_is_busy[0] and not current_stream_status_is_busy[1]:
+            action = np.array([num_tasks, 0, smallest_arrival_time_task_idx, 0])
+        elif not current_stream_status_is_busy[0] and current_stream_status_is_busy[1]:
+            action = np.array([smallest_arrival_time_task_idx, 0, num_tasks, 0])
+        else:
+            action = np.array(
+                [
+                    smallest_arrival_time_task_idx,
+                    0,
+                    second_smallest_arrival_time_task_idx,
+                    0,
+                ]
+            )
+        obs, rewards, dones, tun, info = env.step(action)
+
+        if dones or tun:
+            obs, info = env.reset()
+    env.close()
 
 
 if __name__ == "__main__":
+    test_list: List[str] = ["MPPO", "DM", "DMI", "STF", "FIFO"]
     print("Testing MPPO")
     test_MPPO()
     print("Testing DM")
     test_DM()
+    print("Testing STF")
+    test_STF()
+    print("Testing FIFO")
+    test_FIFO()
+    for test_name in test_list:
+        # read the log file
+        log_file = f"{test_name}_logs.csv"
+        logs: pd.DataFrame = pd.read_csv(log_file)
+        # columns test_count,task_id,total_task_count,total_task_accurate,total_missed_deadlines,total_task_actual_inference
+        # we can calculate the average accuracy
+        total_task_count: int = logs["total_task_count"].sum()
+        total_task_accurate: int = logs["total_task_accurate"].sum()
+        total_missed_deadlines: int = logs["total_missed_deadlines"].sum()
+        total_task_actual_inference: int = logs["total_task_actual_inference"].sum()
+        accuracy: float = total_task_accurate / total_task_actual_inference
+        missed_deadlines: float = total_missed_deadlines / total_task_count
+        print(
+            f"Test {test_name} accuracy: {accuracy}, missed deadlines: {missed_deadlines}"
+        )

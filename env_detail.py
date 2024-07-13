@@ -23,6 +23,7 @@ import pynvml
 from stable_baselines3.common.callbacks import BaseCallback
 from sb3_contrib.common.maskable.utils import get_action_masks
 import warnings
+import pandas as pd
 
 # warnings.filterwarnings("ignore")
 
@@ -100,8 +101,10 @@ def get_gpu_resources() -> Tuple[float, float]:
     return avg_gpu_util / 100.0, avg_mem_util / 100.0
 
 
-class DLSchedulingEnv(gym.Env):
+class DetailedDLSchedulingEnv(gym.Env):
     def _models_self_test(self) -> None:
+        if_training: bool = self.if_training
+        self.if_training = True
         for task_id in range(self.num_tasks):
             for var_id in range(self.num_variants):
                 self.stream_is_busy[0] = True
@@ -125,9 +128,12 @@ class DLSchedulingEnv(gym.Env):
             self.total_task_actual_inference[task_id] = 0
             self.total_task_accurate[task_id] = 0
             self.total_missed_deadlines[task_id] = 0
+        self.if_training = if_training
         self.reset()
 
     def _step_self_test(self) -> None:
+        if_training: bool = self.if_training
+        self.if_training = True
         for task_id1 in range(self.num_tasks + 1):
             for var_id1 in range(self.num_variants):
                 for task_id2 in range(self.num_tasks + 1):
@@ -136,12 +142,19 @@ class DLSchedulingEnv(gym.Env):
                         obs, reward, done, tun, info = self.step(action)
                         if done:
                             self.reset()
+        self.if_training = if_training
         self.reset()
 
     def __init__(
-        self, config_file: str, model_info_file: str, if_training: bool = False
+        self,
+        config_file: str,
+        model_info_file: str,
+        if_training: bool = False,
+        test_name: str = "MPPO",
     ) -> None:
-        super(DLSchedulingEnv, self).__init__()
+        super(DetailedDLSchedulingEnv, self).__init__()
+        self.test_round_cnt: int = 0
+        self.test_name: str = test_name
         self.if_training: bool = if_training
         self.train_time_record: float = 0.0
         with open(config_file, "r") as file:
@@ -187,6 +200,8 @@ class DLSchedulingEnv(gym.Env):
         self.start_time: float = time.time() * 1000
         self._models_self_test()
         self._step_self_test()
+        self._logs: pd.DataFrame = pd.DataFrame()
+        # columns are test_count task_id total_task_count, total_task_accurate, total_missed_deadlines, total_task_actual_inference
         self.start_time = time.time() * 1000
 
     def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
@@ -249,7 +264,7 @@ class DLSchedulingEnv(gym.Env):
             model_name: str = row["Model Name"]
             self.model_name_set.add(model_name)
             variant_id: int = int(row["Model Number"]) - 1
-            runtime: float = row["Inference Time (s)"] / column_max
+            runtime: float = row["Inference Time (s)"] 
             accuracy: float = row["Accuracy (Percentage)"] / 100
             if model_name not in runtime_dict:
                 runtime_dict[model_name] = [None] * self.num_variants
@@ -284,6 +299,19 @@ class DLSchedulingEnv(gym.Env):
                     shape=(self.num_tasks,),
                     dtype=np.float32,
                 ),
+                "infer_time": spaces.Box(
+                    low=0,
+                    high=1,
+                    shape=(self.num_tasks, self.num_variants),
+                    dtype=np.float32,
+                ),
+                "start_time": spaces.Box(
+                    low=0,
+                    high=1,
+                    shape=(self.num_tasks, self.num_variants),
+                    dtype=np.float32,
+                ),
+                "if_arrived": spaces.MultiBinary(self.num_tasks),
                 "gpu_resources": spaces.Box(
                     low=0, high=1, shape=(2,), dtype=np.float32
                 ),
@@ -344,9 +372,24 @@ class DLSchedulingEnv(gym.Env):
                 )
             else:
                 task_ddls.append(self.max_deadline * 10)
+        start_times = []
+        for task_id, queue in self.task_queues.items():
+            if (
+                self.current_task_pointer[task_id] < len(queue)
+                and self.task_arrived[task_id]
+            ):
+                start_times.append(
+                    queue[self.current_task_pointer[task_id]]["start_time"]
+                )
+            else:
+                start_times.append(self.total_time_ms * 10)
+
         initial_observation = {
             "current_streams_status": np.array([0, 0], dtype=np.float32),
             "task_deadlines": np.array(task_ddls, dtype=np.float32),
+            "infer_time": self.variant_runtimes,
+            "start_time": start_times,
+            "if_arrived": task_if_arrived,
             "gpu_resources": np.array(get_gpu_resources(), dtype=np.float32),
         }
         info = {}
@@ -368,7 +411,7 @@ class DLSchedulingEnv(gym.Env):
         device: torch.device = torch.device("cuda:0")
         stream: torch.cuda.Stream = self.streams[stream_index]
         penalty_function: Callable[[float], float] = lambda x: (
-            10 + x * 0.1 if x > 0 else -3 + x * 0.1
+            20 + x * 0.1 if x > 0 else -3 + x * 0.1
         )
         model.eval()
         model.to(device)
@@ -494,7 +537,7 @@ class DLSchedulingEnv(gym.Env):
                     and queue[self.current_task_pointer[task_id]]["deadline"]
                     <= current_time_ms - self.start_time
                 ):
-                    reward -= 10
+                    reward -= 20
                     self.total_missed_deadlines[task_id] += 1
                     self.current_task_pointer[task_id] += 1
                 if (
@@ -521,9 +564,23 @@ class DLSchedulingEnv(gym.Env):
                 )
             else:
                 task_ddls.append(self.max_deadline * 10)
+        start_times: List[float] = []
+        for task_id, queue in self.task_queues.items():
+            if (
+                self.current_task_pointer[task_id] < len(queue)
+                and self.task_arrived[task_id]
+            ):
+                start_times.append(
+                    queue[self.current_task_pointer[task_id]]["start_time"]
+                )
+            else:
+                start_times.append(self.total_time_ms * 10)
         observation: Dict[str, Any] = {
             "current_streams_status": np.array(self.stream_is_busy, dtype=np.float32),
             "task_deadlines": np.array(task_ddls, dtype=np.float32),
+            "infer_time": self.variant_runtimes,
+            "start_time": start_times,
+            "if_arrived": np.array(self.task_arrived, dtype=np.float32),
             "gpu_resources": np.array(gpu_resources, dtype=np.float32),
         }
         # all tasks_pointer reached end of queue, and all tasks are idle
@@ -549,6 +606,9 @@ class DLSchedulingEnv(gym.Env):
         for stream in self.streams:
             stream.synchronize()
         del self.streams
+        if self.if_training:
+            return
+        self._logs.to_csv(f"{self.test_name}_logs.csv", index=False)
 
     def valid_action_mask(self) -> np.ndarray:
         task_mask1 = (
@@ -612,57 +672,17 @@ class DLSchedulingEnv(gym.Env):
             print(
                 f"task {task_id} missed deadlines: {self.total_missed_deadlines[task_id]}"
             )
-
-
-if __name__ == "__main__":
-    env: DLSchedulingEnv = DLSchedulingEnv(
-        config_file="config.json",
-        model_info_file="model_information.csv",
-        if_training=True,
-    )
-    env = ActionMasker(env, lambda env: env.valid_action_mask())
-    env = make_vec_env(lambda: env, n_envs=1)
-
-    device: torch.device = torch.device("cpu")
-    model: MaskablePPO = MaskablePPO(
-        "MultiInputPolicy",
-        env,
-        verbose=1,
-        tensorboard_log="./logs/",
-        device=device,
-        learning_rate=0.0003,
-    )
-
-    eval_callback: MaskableEvalCallback = MaskableEvalCallback(
-        env,
-        best_model_save_path="./logs/",
-        log_path="./logs/",
-        eval_freq=10000000,
-        deterministic=True,
-        render=False,
-    )
-    env.reset()
-    model.learn(total_timesteps=250000, callback=eval_callback, progress_bar=True)
-    model.save("ppo_dl_scheduling")
-    model = MaskablePPO.load("ppo_dl_scheduling")
-    env.close()
-    env = DLSchedulingEnv(
-        config_file="config.json",
-        model_info_file="model_information.csv",
-        if_training=False,
-    )
-    env = ActionMasker(env, lambda env: env.valid_action_mask())
-    env = make_vec_env(lambda: env, n_envs=1)
-    obs = env.reset()
-    for i in range(10000):
-        action_masks = get_action_masks(env)
-        action: np.ndarray
-        action, _states = model.predict(
-            obs, action_masks=action_masks, deterministic=True
-        )
-        obs, rewards, dones, info = env.step(action)
-
-        if dones:
-            obs = env.reset()
-            break
-    env.close()
+        for task_id in range(self.num_tasks):
+            row: Dict[str, Any] = {
+                "test_count": self.test_round_cnt,
+                "task_id": task_id,
+                "total_task_count": self.total_tasks_count[task_id],
+                "total_task_accurate": self.total_task_accurate[task_id],
+                "total_missed_deadlines": self.total_missed_deadlines[task_id],
+                "total_task_actual_inference": self.total_task_actual_inference[
+                    task_id
+                ],
+            }
+            # as the next column
+            self._logs = pd.concat([self._logs, pd.DataFrame([row])], ignore_index=True)
+        self.test_round_cnt += 1

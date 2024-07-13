@@ -16,16 +16,11 @@ from torchvision import datasets, transforms
 from torch import nn
 import threading
 from stable_baselines3.common.env_util import make_vec_env
-from sb3_contrib import MaskablePPO
-from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
-from sb3_contrib.common.wrappers import ActionMasker
+from stable_baselines3 import DQN
+from stable_baselines3.common.callbacks import EvalCallback
 import pynvml
 from stable_baselines3.common.callbacks import BaseCallback
-from sb3_contrib.common.maskable.utils import get_action_masks
 import warnings
-import pandas as pd
-
-# warnings.filterwarnings("ignore")
 
 pynvml.nvmlInit()
 avg_predict_time: float = 1.468617820739746
@@ -150,7 +145,7 @@ class DLSchedulingEnv(gym.Env):
         config_file: str,
         model_info_file: str,
         if_training: bool = False,
-        test_name: str = "MPPO",
+        test_name: str = "DQN",
     ) -> None:
         super(DLSchedulingEnv, self).__init__()
         self.test_round_cnt: int = 0
@@ -201,7 +196,6 @@ class DLSchedulingEnv(gym.Env):
         self._models_self_test()
         self._step_self_test()
         self._logs: pd.DataFrame = pd.DataFrame()
-        # columns are test_count task_id total_task_count, total_task_accurate, total_missed_deadlines, total_task_actual_inference
         self.start_time = time.time() * 1000
 
     def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
@@ -543,7 +537,6 @@ class DLSchedulingEnv(gym.Env):
             "task_deadlines": np.array(task_ddls, dtype=np.float32),
             "gpu_resources": np.array(gpu_resources, dtype=np.float32),
         }
-        # all tasks_pointer reached end of queue, and all tasks are idle
         done: bool = all(
             [
                 self.current_task_pointer[task_id] >= len(queue)
@@ -554,11 +547,8 @@ class DLSchedulingEnv(gym.Env):
         info: Dict[str, Any] = {}
         if self.if_training:
             self.train_time_record = time.time() * 1000
-        # print(f"Task Arrived: {self.task_arrived}")
-        # print(f"ACTION: {action}, REWARD: {reward}")
         if not self.if_training and done:
             self.render("human")
-        # print(f"Step Time: {time.time() * 1000 - start_step_time}")
         return observation, reward, done, done, info
 
     def close(self) -> None:
@@ -643,7 +633,6 @@ class DLSchedulingEnv(gym.Env):
                     task_id
                 ],
             }
-            # as the next column
             self._logs = pd.concat([self._logs, pd.DataFrame([row])], ignore_index=True)
         self.test_round_cnt += 1
 
@@ -654,12 +643,11 @@ if __name__ == "__main__":
         model_info_file="model_information.csv",
         if_training=True,
     )
-    env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
 
     device: torch.device = torch.device("cpu")
-    model: MaskablePPO = MaskablePPO(
-        "MultiInputPolicy",
+    model: DQN = DQN(
+        "MlpPolicy",
         env,
         verbose=1,
         tensorboard_log="./logs/",
@@ -667,33 +655,28 @@ if __name__ == "__main__":
         learning_rate=0.0003,
     )
 
-    eval_callback: MaskableEvalCallback = MaskableEvalCallback(
+    eval_callback: EvalCallback = EvalCallback(
         env,
         best_model_save_path="./logs/",
         log_path="./logs/",
-        eval_freq=10000000,
+        eval_freq=10000,
         deterministic=True,
         render=False,
     )
     env.reset()
     model.learn(total_timesteps=100000, callback=eval_callback, progress_bar=True)
-    model.save("ppo_dl_scheduling")
-    model = MaskablePPO.load("ppo_dl_scheduling")
+    model.save("dqn_dl_scheduling")
+    model = DQN.load("dqn_dl_scheduling")
     env.close()
     env = DLSchedulingEnv(
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=False,
     )
-    env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
     obs = env.reset()
     for i in range(10000):
-        action_masks = get_action_masks(env)
-        action: np.ndarray
-        action, _states = model.predict(
-            obs, action_masks=action_masks, deterministic=True
-        )
+        action, _states = model.predict(obs, deterministic=True)
         obs, rewards, dones, info = env.step(action)
 
         if dones:

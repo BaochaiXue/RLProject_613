@@ -10,3 +10,8 @@ __pycache__/environment.cpython-310.pyc
 ppo_dl_scheduling.zip
 ppo_dl_schedulingcpu.zip
 ppo_dl_schedulingcuda.zip
+DM_logs.csv
+DMI_logs.csv
+FIFO_logs.csv
+STF_logs.csv
+__pycache__/env_detail.cpython-310.pyc
