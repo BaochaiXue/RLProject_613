@@ -21,12 +21,20 @@ from stable_baselines3.common.callbacks import EvalCallback
 import pynvml
 import warnings
 from sb3_contrib import ARS
-
+from stable_baselines3.common.torch_layers import (
+    FlattenExtractor,
+    BaseFeaturesExtractor,
+)
+import torch.nn.functional as F
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_util import make_vec_env
+from sb3_contrib import QRDQN
+import sys
 
 warnings.filterwarnings("ignore")
 pynvml.nvmlInit()
 avg_predict_time: float = 1.468617820739746
-std_predict_time: float = 5.535014694757007
+std_predict_time: float = 2.535014694757007
 
 
 def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
@@ -570,7 +578,7 @@ class FlattenDLSchedulingEnv(gym.Env):
         del self.streams
         if self.if_training:
             return
-        self._logs.to_csv(f"{self.test_name}_logs.csv", index=False)
+        self._logs.to_csv(f"my_log/{self.test_name}_logs.csv", index=False)
 
     def render(self, mode: str = "human") -> None:
         total_task_finished: int = np.sum(self.total_tasks_count)
@@ -603,7 +611,30 @@ class FlattenDLSchedulingEnv(gym.Env):
         self.test_round_cnt += 1
 
 
-time_step_of_training: int = 10000
+class CustomCombinedExtractor(BaseFeaturesExtractor):
+    def __init__(self, observation_space: gym.spaces.Dict):
+        super(CustomCombinedExtractor, self).__init__(observation_space, features_dim=1)
+        extractors = {}
+
+        for key, subspace in observation_space.spaces.items():
+            if isinstance(subspace, gym.spaces.Box):
+                if len(subspace.shape) == 1:
+                    extractors[key] = nn.Linear(subspace.shape[0], 64)
+                else:
+                    raise NotImplementedError(f"Unsupported shape {subspace.shape}")
+            elif isinstance(subspace, gym.spaces.MultiBinary):
+                extractors[key] = nn.Linear(subspace.shape[0], 64)
+            else:
+                raise NotImplementedError(f"Unsupported space type: {type(subspace)}")
+
+        self.extractors = nn.ModuleDict(extractors)
+        self._features_dim = sum([64 for _ in self.extractors.values()])
+
+    def forward(self, observations) -> torch.Tensor:
+        encoded_tensor_list = []
+        for key, extractor in self.extractors.items():
+            encoded_tensor_list.append(F.relu(extractor(observations[key])))
+        return torch.cat(encoded_tensor_list, dim=1)
 
 
 def train_dqn(time_step_of_traning: int) -> None:
@@ -636,8 +667,8 @@ def train_dqn(time_step_of_traning: int) -> None:
     model.learn(
         total_timesteps=time_step_of_training, callback=eval_callback, progress_bar=True
     )
-    model.save("dqn_dl_scheduling")
-    model = DQN.load("dqn_dl_scheduling")
+    model.save("RL_models/dqn_dl_scheduling")
+    model = DQN.load("RL_models/dqn_dl_scheduling")
     env.close()
     env = FlattenDLSchedulingEnv(
         config_file="config.json",
@@ -655,7 +686,7 @@ def train_dqn(time_step_of_traning: int) -> None:
     env.close()
 
 
-def train_ars(time_step_of_training: int) -> None:
+def train_QRDQN(time_step_of_training: int) -> None:
     env: FlattenDLSchedulingEnv = FlattenDLSchedulingEnv(
         config_file="config.json",
         model_info_file="model_information.csv",
@@ -664,7 +695,7 @@ def train_ars(time_step_of_training: int) -> None:
     env = make_vec_env(lambda: env, n_envs=1)
 
     device: torch.device = torch.device("cpu")
-    model: ARS = ARS(
+    model: QRDQN = QRDQN(
         "MultiInputPolicy",
         env,
         verbose=1,
@@ -683,10 +714,12 @@ def train_ars(time_step_of_training: int) -> None:
     )
     env.reset()
     model.learn(
-        total_timesteps=time_step_of_training, callback=eval_callback, progress_bar=True
+        total_timesteps=time_step_of_training,
+        callback=eval_callback,
+        progress_bar=True,
     )
-    model.save("ars_dl_scheduling")
-    model = ARS.load("ars_dl_scheduling")
+    model.save("RL_models/qrdqn_dl_scheduling")
+    model = QRDQN.load("RL_models/qrdqn_dl_scheduling")
     env.close()
     env = FlattenDLSchedulingEnv(
         config_file="config.json",
@@ -702,3 +735,11 @@ def train_ars(time_step_of_training: int) -> None:
             obs = env.reset()
             break
     env.close()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: environment.py <param1> <param2>")
+    time_step_of_training: int = int(sys.argv[1])
+    train_dqn(time_step_of_training * 2)
+    train_QRDQN(time_step_of_training // 8)

@@ -264,7 +264,7 @@ class DetailedDLSchedulingEnv(gym.Env):
             model_name: str = row["Model Name"]
             self.model_name_set.add(model_name)
             variant_id: int = int(row["Model Number"]) - 1
-            runtime: float = row["Inference Time (s)"] 
+            runtime: float = row["Inference Time (s)"]
             accuracy: float = row["Accuracy (Percentage)"] / 100
             if model_name not in runtime_dict:
                 runtime_dict[model_name] = [None] * self.num_variants
@@ -449,7 +449,9 @@ class DetailedDLSchedulingEnv(gym.Env):
                 self.start_time += (
                     current_time - self.train_time_record
                 )  # we need to adjust the start time
-                self.start_time -= np.random.normal(avg_predict_time, std_predict_time)
+                self.start_time -= np.abs(
+                    np.random.normal(avg_predict_time, std_predict_time)
+                )
         task1_id: int
         variant1_id: int
         task2_id: int
@@ -608,7 +610,7 @@ class DetailedDLSchedulingEnv(gym.Env):
         del self.streams
         if self.if_training:
             return
-        self._logs.to_csv(f"{self.test_name}_logs.csv", index=False)
+        self._logs.to_csv(f"my_log/{self.test_name}_logs.csv", index=False)
 
     def valid_action_mask(self) -> np.ndarray:
         task_mask1 = (

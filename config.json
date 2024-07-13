@@ -1,5 +1,5 @@
 {
-    "num_tasks": 6,
+    "num_tasks": 7,
     "num_variants": 5,
     "total_time_ms": 10000,
     "task_list": [
@@ -54,6 +54,14 @@
             "if_periodic": false,
             "possion_lambda": 93,
             "deadline_ms": 97
+        },
+        {
+            "name": "task7",
+            "model": "vgg16",
+            "address": "selected_models/vgg16",
+            "data": "CIFAR10",
+            "if_periodic": true,
+            "period_ms": 60
         }
     ]
 }

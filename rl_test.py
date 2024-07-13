@@ -28,12 +28,19 @@ from env_detail import DetailedDLSchedulingEnv
 from other_rl_trains import FlattenDLSchedulingEnv
 from stable_baselines3 import DQN
 from sb3_contrib import ARS
+from sb3_contrib import TRPO
+from stable_baselines3 import PPO
+import warnings
+import pandas as pd
+from stable_baselines3 import A2C
+from stable_baselines3.common.env_util import make_vec_env
+from sb3_contrib import QRDQN
 
 warnings.filterwarnings("ignore")
 
 
 def test_MPPO():
-    model = MaskablePPO.load("ppo_dl_scheduling")
+    model = MaskablePPO.load("RL_models/mppo_dl_scheduling")
     env = DLSchedulingEnv(
         config_file="config.json",
         model_info_file="model_information.csv",
@@ -93,46 +100,6 @@ def test_DM():
         obs, rewards, dones, tun, info = env.step(action)
         # time.sleep(0.001)
         if dones:
-            obs, info = env.reset()
-    env.close()
-
-
-def test_DMI():
-    # DM means deadline monotonic scheduling inverted
-    env = DLSchedulingEnv(
-        config_file="config.json",
-        model_info_file="model_information.csv",
-        if_training=False,
-        test_name="DMI",
-    )
-    obs: np.ndarray
-    info: Dict[str, Any]
-    obs, info = env.reset()
-    for i in range(10000):
-        action: np.ndarray
-        num_tasks: int = env.num_tasks
-        num_variants: int = env.num_variants
-        # we check in the obs
-        # maskable_action = env.valid_action_mask()
-        current_stream_status_is_busy: np.ndarray = obs["current_streams_status"]
-        task_deadlines: np.ndarray = obs["task_deadlines"]
-        biggest_deadline_task_idx: int = np.argmax(task_deadlines)
-        second_biggest_deadline_task_idx: int = np.argmax(
-            np.where(task_deadlines == np.max(task_deadlines), -np.inf, task_deadlines)
-        )
-        if current_stream_status_is_busy[0] and current_stream_status_is_busy[1]:
-            action = np.array([num_tasks, 0, num_tasks, 0])
-        elif current_stream_status_is_busy[0] and not current_stream_status_is_busy[1]:
-            action = np.array([num_tasks, 0, biggest_deadline_task_idx, 0])
-        elif not current_stream_status_is_busy[0] and current_stream_status_is_busy[1]:
-            action = np.array([biggest_deadline_task_idx, 0, num_tasks, 0])
-        else:
-            action = np.array(
-                [biggest_deadline_task_idx, 0, second_biggest_deadline_task_idx, 0]
-            )
-        obs, rewards, dones, tun, info = env.step(action)
-
-        if dones or tun:
             obs, info = env.reset()
     env.close()
 
@@ -244,7 +211,7 @@ def test_FIFO():
 
 
 def test_DQN():
-    model = DQN.load("dqn_dl_scheduling")
+    model = DQN.load("RL_models/dqn_dl_scheduling")
     env = FlattenDLSchedulingEnv(
         config_file="config.json",
         model_info_file="model_information.csv",
@@ -257,19 +224,125 @@ def test_DQN():
         obs, rewards, dones, info = env.step(action)
         if dones:
             obs = env.reset()
-            break
+    env.close()
+
+
+def test_TRPO():
+    model = TRPO.load("RL_models/trpo_dl_scheduling")
+    env = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+    )
+    env = ActionMasker(env, lambda env: env.valid_action_mask())
+    env = make_vec_env(lambda: env, n_envs=1)
+    obs = env.reset()
+    have_reset: bool = False
+    for i in range(10000):
+        action: np.ndarray
+        action, _states = model.predict(obs, deterministic=True)
+        obs, rewards, dones, info = env.step(action)
+
+        if dones or (i == 9999 and not have_reset):
+            obs = env.reset()
+            have_reset = True
+    env.close()
+
+
+def test_A2C():
+    model = A2C.load("RL_models/a2c_dl_scheduling")
+    env = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+    )
+    env = ActionMasker(env, lambda env: env.valid_action_mask())
+    env = make_vec_env(lambda: env, n_envs=1)
+    obs = env.reset()
+    for i in range(10000):
+        action: np.ndarray
+        action, _states = model.predict(obs, deterministic=True)
+        obs, rewards, dones, info = env.step(action)
+
+        if dones:
+            obs = env.reset()
+    env.close()
+
+
+def test_PPO():
+    model = PPO.load("RL_models/ppo_dl_scheduling")
+    env = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+    )
+    env = ActionMasker(env, lambda env: env.valid_action_mask())
+    env = make_vec_env(lambda: env, n_envs=1)
+    obs = env.reset()
+    for i in range(10000):
+        action: np.ndarray
+        action, _states = model.predict(obs, deterministic=True)
+        obs, rewards, dones, info = env.step(action)
+
+        if dones:
+            obs = env.reset()
+    env.close()
+
+
+def test_QRDQN():
+    model = QRDQN.load("RL_models/qrdqn_dl_scheduling")
+    env = FlattenDLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+    )
+    env = make_vec_env(lambda: env, n_envs=1)
+    obs = env.reset()
+    for i in range(10000):
+        action, _states = model.predict(obs, deterministic=True)
+        obs, rewards, dones, info = env.step(action)
+        if dones:
+            obs = env.reset()
     env.close()
 
 
 if __name__ == "__main__":
-    test_list: List[str] = ["MPPO", "DQN"]
-    print("Testing MPPO")
-    test_MPPO()
-    print("Testing DQN")
-    test_DQN()
+    test_list: List[str] = [
+        "MPPO",
+        "DM",
+        "STF",
+        "FIFO",
+        "DQN",
+        "TRPO",
+        "A2C",
+        "PPO",
+        "QRDQN",
+    ]
+    test_list: List[str] = ["TRPO", "A2C", "PPO", "QRDQN"]
+    for test_name in test_list:
+        print(f"Testing {test_name}")
+        if test_name == "MPPO":
+            test_MPPO()
+        elif test_name == "DM":
+            test_DM()
+        elif test_name == "STF":
+            test_STF()
+        elif test_name == "FIFO":
+            test_FIFO()
+        elif test_name == "DQN":
+            test_DQN()
+        elif test_name == "TRPO":
+            test_TRPO()
+        elif test_name == "A2C":
+            test_A2C()
+        elif test_name == "PPO":
+            test_PPO()
+        elif test_name == "QRDQN":
+            test_QRDQN()
+
     for test_name in test_list:
         # read the log file
-        log_file = f"{test_name}_logs.csv"
+        log_file = f"my_log/{test_name}_logs.csv"
         logs: pd.DataFrame = pd.read_csv(log_file)
         # columns test_count,task_id,total_task_count,total_task_accurate,total_missed_deadlines,total_task_actual_inference
         # we can calculate the average accuracy

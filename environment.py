@@ -22,59 +22,103 @@ from sb3_contrib.common.wrappers import ActionMasker
 import pynvml
 from stable_baselines3.common.callbacks import BaseCallback
 from sb3_contrib.common.maskable.utils import get_action_masks
+from sb3_contrib import TRPO
+from stable_baselines3 import PPO
 import warnings
 import pandas as pd
+from stable_baselines3 import A2C
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import SubprocVecEnv
+import sys
 
 # warnings.filterwarnings("ignore")
 
 pynvml.nvmlInit()
 avg_predict_time: float = 1.468617820739746
-std_predict_time: float = 5.535014694757007
+std_predict_time: float = 2.535014694757007
 
 
-def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
-    transform = (
-        transforms.Compose(
-            [
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
-                ),
-            ]
+def load_testset(vit_16_using: bool, dataset_name: str) -> Any:
+    if dataset_name == "CIFAR10":
+        transform = (
+            transforms.Compose(
+                [
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
+                    ),
+                ]
+            )
+            if vit_16_using
+            else transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
+                    ),
+                ]
+            )
         )
-        if vit_16_using
-        else transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
-                ),
-            ]
-        )
-    )
 
-    testset: datasets.CIFAR10 = datasets.CIFAR10(
-        root="./data", train=False, transform=transform, download=True
-    )
+        testset = datasets.CIFAR10(
+            root="./data", train=False, transform=transform, download=True
+        )
+    elif dataset_name == "GTSRB":
+        transform = (
+            transforms.Compose(
+                [
+                    transforms.Resize((32, 32)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.3403, 0.3121, 0.3214], std=[0.2724, 0.2608, 0.2669]
+                    ),
+                ]
+            )
+            if not vit_16_using
+            else transforms.Compose(
+                [
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.3403, 0.3121, 0.3214], std=[0.2724, 0.2608, 0.2669]
+                    ),
+                ]
+            )
+        )
+
+        testset = datasets.GTSRB(
+            root="./data", split="test", transform=transform, download=True
+        )
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
+
     return testset
 
 
-testset_non_vit: datasets.CIFAR10 = load_testset(False)
-testset_vit: datasets.CIFAR10 = load_testset(True)
+testset_non_vit: datasets.CIFAR10 = load_testset(False, "CIFAR10")
+testset_vit: datasets.CIFAR10 = load_testset(True, "CIFAR10")
+testset_gtsrb: datasets.GTSRB = load_testset(False, "GTSRB")
 
 
-def load_single_test_image(vit_16_using: bool) -> DataLoader:
-    testset: datasets.CIFAR10 = testset_vit if vit_16_using else testset_non_vit
-    random_index: int = random.randint(0, len(testset) - 1)
-    test_subset: Subset = Subset(testset, [random_index])
-    testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
-    return testloader
+def load_single_test_image(vit_16_using: bool, dataset_name: str = "CIFAR10") -> Any:
+    if dataset_name == "CIFAR10":
+        testset: datasets.CIFAR10 = testset_vit if vit_16_using else testset_non_vit
+        random_index: int = random.randint(0, len(testset) - 1)
+        test_subset: Subset = Subset(testset, [random_index])
+        testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
+        return testloader
+    elif dataset_name == "GTSRB":
+        testset: datasets.GTSRB = testset_gtsrb
+        random_index: int = random.randint(0, len(testset) - 1)
+        test_subset: Subset = Subset(testset, [random_index])
+        testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
+        return testloader
 
 
-def load_model(model_name: str, model_number: int) -> nn.Module:
+def load_model(model_name: str, model_number: int, dataset_name: str) -> nn.Module:
     model_file: str = (
-        f"selected_models/{model_name}/{model_name}_cifar10_{model_number}.pth"
+        f"selected_models/{model_name}/{model_name}_{dataset_name}_{model_number}.pth"
     )
     if not os.path.exists(model_file):
         raise FileNotFoundError(f"Model file {model_file} not found.")
@@ -191,7 +235,9 @@ class DLSchedulingEnv(gym.Env):
         for model_name in self.model_name_set:
             for variant_id in range(self.num_variants):
                 self.models[(model_name, variant_id)] = load_model(
-                    model_name, variant_id + 1
+                    model_name,
+                    variant_id + 1,
+                    "cifar10" if "alexnet" not in model_name else "GTSRB",
                 )
                 self.models[(model_name, variant_id)].to("cuda:0")
         self.locks: List[threading.Lock] = [
@@ -379,7 +425,9 @@ class DLSchedulingEnv(gym.Env):
         deadline: float,
     ) -> Tuple[int, int]:
         model: nn.Module = self.models[(task["model"], variant_id)]
-        dataloader: DataLoader = load_single_test_image("vit" in task["model"])
+        dataloader: DataLoader = load_single_test_image(
+            "vit" in task["model"], "CIFAR10"
+        )
         device: torch.device = torch.device("cuda:0")
         stream: torch.cuda.Stream = self.streams[stream_index]
         penalty_function: Callable[[float], float] = lambda x: (
@@ -568,7 +616,7 @@ class DLSchedulingEnv(gym.Env):
         del self.streams
         if self.if_training:
             return
-        self._logs.to_csv(f"{self.test_name}_logs.csv", index=False)
+        self._logs.to_csv(f"my_log/{self.test_name}_logs.csv", index=False)
 
     def valid_action_mask(self) -> np.ndarray:
         task_mask1 = (
@@ -648,7 +696,7 @@ class DLSchedulingEnv(gym.Env):
         self.test_round_cnt += 1
 
 
-if __name__ == "__main__":
+def train_MaskablePPO(time_step_of_training: int) -> None:
     env: DLSchedulingEnv = DLSchedulingEnv(
         config_file="config.json",
         model_info_file="model_information.csv",
@@ -676,9 +724,11 @@ if __name__ == "__main__":
         render=False,
     )
     env.reset()
-    model.learn(total_timesteps=100000, callback=eval_callback, progress_bar=True)
-    model.save("ppo_dl_scheduling")
-    model = MaskablePPO.load("ppo_dl_scheduling")
+    model.learn(
+        total_timesteps=time_step_of_training, callback=eval_callback, progress_bar=True
+    )
+    model.save("RL_models/mppo_dl_scheduling")
+    model = MaskablePPO.load("RL_models/mppo_dl_scheduling")
     env.close()
     env = DLSchedulingEnv(
         config_file="config.json",
@@ -700,3 +750,139 @@ if __name__ == "__main__":
             obs = env.reset()
             break
     env.close()
+
+
+def train_TRPO(time_step_of_training: int) -> None:
+    env: DLSchedulingEnv = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=True,
+    )
+    env = make_vec_env(lambda: env, n_envs=1)
+
+    device: torch.device = torch.device("cpu")
+    model: TRPO = TRPO(
+        "MultiInputPolicy",
+        env,
+        verbose=1,
+        tensorboard_log="./logs/",
+        device=device,
+        learning_rate=0.0003,
+    )
+
+    env.reset()
+    model.learn(total_timesteps=time_step_of_training, progress_bar=True)
+    model.save("RL_models/trpo_dl_scheduling")
+    model = TRPO.load("RL_models/trpo_dl_scheduling")
+    env.close()
+    env = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+    )
+    env = ActionMasker(env, lambda env: env.valid_action_mask())
+    env = make_vec_env(lambda: env, n_envs=1)
+    obs = env.reset()
+    for i in range(10000):
+        action: np.ndarray
+        action, _states = model.predict(obs, deterministic=True)
+        obs, rewards, dones, info = env.step(action)
+
+        if dones:
+            obs = env.reset()
+            break
+    env.close()
+
+
+def train_PPO(time_step_of_training: int) -> None:
+    env: DLSchedulingEnv = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=True,
+    )
+    env = make_vec_env(lambda: env, n_envs=1)
+
+    device: torch.device = torch.device("cpu")
+    model: PPO = PPO(
+        "MultiInputPolicy",
+        env,
+        verbose=1,
+        tensorboard_log="./logs/",
+        device=device,
+        learning_rate=0.0003,
+    )
+
+    env.reset()
+    model.learn(total_timesteps=time_step_of_training, progress_bar=True)
+    model.save("RL_models/ppo_dl_scheduling")
+    model = PPO.load("RL_models/ppo_dl_scheduling")
+    env.close()
+    env = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+    )
+    env = ActionMasker(env, lambda env: env.valid_action_mask())
+    env = make_vec_env(lambda: env, n_envs=1)
+    obs = env.reset()
+    for i in range(10000):
+        action: np.ndarray
+        action, _states = model.predict(obs, deterministic=True)
+        obs, rewards, dones, info = env.step(action)
+
+        if dones:
+            obs = env.reset()
+            break
+    env.close()
+
+
+def train_A2C(time_step_of_training: int) -> None:
+    env: DLSchedulingEnv = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=True,
+    )
+    env = make_vec_env(lambda: env, n_envs=1)
+
+    device: torch.device = torch.device("cpu")
+    model: A2C = A2C(
+        "MultiInputPolicy",
+        env,
+        verbose=1,
+        tensorboard_log="./logs/",
+        device=device,
+        learning_rate=0.0003,
+    )
+
+    env.reset()
+    model.learn(total_timesteps=time_step_of_training, progress_bar=True)
+    model.save("RL_models/a2c_dl_scheduling")
+    model = A2C.load("RL_models/a2c_dl_scheduling")
+    env.close()
+    env = DLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+    )
+    env = ActionMasker(env, lambda env: env.valid_action_mask())
+    env = make_vec_env(lambda: env, n_envs=1)
+    obs = env.reset()
+    for i in range(10000):
+        action: np.ndarray
+        action, _states = model.predict(obs, deterministic=True)
+        obs, rewards, dones, info = env.step(action)
+
+        if dones:
+            obs = env.reset()
+            break
+    env.close()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: environment.py <param1> <param2>")
+    time_step_of_training: int = int(sys.argv[1])
+    train_MaskablePPO(time_step_of_training)
+    train_TRPO(time_step_of_training)
+    train_PPO(time_step_of_training)
+    train_A2C(time_step_of_training)
