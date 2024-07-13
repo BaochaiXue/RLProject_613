@@ -8,22 +8,14 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets import CIFAR10
 import typing
 from typing import Callable
+import warnings
+
+warnings.filterwarnings("ignore")
 
 
 def get_inference_time_and_accuracy(
     model: torch.nn.Module, dataloader: DataLoader, device: torch.device
 ) -> Tuple[float, float]:
-    """
-    Evaluate the model's inference time and accuracy.
-
-    Args:
-        model (torch.nn.Module): The model to be evaluated.
-        dataloader (DataLoader): The dataloader for test data.
-        device (torch.device): The device to run the model on.
-
-    Returns:
-        Tuple[float, float]: Average inference time and accuracy.
-    """
     model.eval()
     model.to(device)
     correct: int = 0
@@ -53,16 +45,8 @@ def rename_models_and_evaluate(
     models_name: List[str],
     csv_file: str,
     device: torch.device,
+    dataset_name: str = "cifar10",
 ) -> None:
-    """
-    Rename models and evaluate their performance.
-
-    Args:
-        directory (str): The directory containing the models.
-        models_name (List[str]): The list of model names.
-        csv_file (str): The CSV file to save the results.
-        device (torch.device): The device to run the models on.
-    """
     results: List[List[typing.Any]] = []
 
     for model_name in models_name:
@@ -113,24 +97,27 @@ def rename_models_and_evaluate(
                     f"No files found in directory {model_directory}."
                 )
 
-            model_files_with_sizes: List[Tuple[str, int]] = [
-                (f, os.path.getsize(os.path.join(model_directory, f))) for f in files
-            ]
-            model_files_with_sizes.sort(key=lambda x: x[1], reverse=True)
+            model_files_with_times: List[Tuple[str, float]] = []
 
-            for idx, (file, size) in enumerate(model_files_with_sizes, start=1):
+            for file in files:
                 old_path: str = os.path.join(model_directory, file)
-                file_extension: str = os.path.splitext(file)[1]
-                new_name: str = f"{model_name}_{idx}{file_extension}"
-                new_path: str = os.path.join(model_directory, new_name)
-
                 model: torch.nn.Module = torch.load(old_path, map_location=device)
-                model.to(device)
-
                 avg_time, accuracy = get_inference_time_and_accuracy(
                     model, test_dataloader, device
                 )
-                results.append([model_name, idx, new_name, avg_time, accuracy, size])
+                model_files_with_times.append((file, avg_time, accuracy))
+
+            model_files_with_times.sort(key=lambda x: x[1], reverse=True)
+
+            for idx, (file, avg_time, accuracy) in enumerate(
+                model_files_with_times, start=1
+            ):
+                old_path: str = os.path.join(model_directory, file)
+                file_extension: str = os.path.splitext(file)[1]
+                new_name: str = f"{model_name}_{dataset_name}_{idx}{file_extension}"
+                new_path: str = os.path.join(model_directory, new_name)
+
+                results.append([model_name, idx, new_name, avg_time, accuracy])
 
                 if old_path != new_path:
                     os.rename(old_path, new_path)
@@ -156,7 +143,6 @@ def rename_models_and_evaluate(
                 "Model File",
                 "Inference Time (s)",
                 "Accuracy (Percentage)",
-                "Model Size (bytes)",
             ]
         )
         writer.writerows(results)
@@ -169,4 +155,4 @@ if __name__ == "__main__":
     csv_file: str = "model_information.csv"
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    rename_models_and_evaluate(directory, models_name, csv_file, device)
+    rename_models_and_evaluate(directory, models_name, csv_file, device, "cifar10")

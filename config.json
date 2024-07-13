@@ -1,7 +1,7 @@
 {
     "num_tasks": 6,
     "num_variants": 5,
-    "total_time_ms": 60000,
+    "total_time_ms": 10000,
     "task_list": [
         {
             "name": "task1",
@@ -9,7 +9,7 @@
             "address": "selected_models/vgg16",
             "data": "CIFAR10",
             "if_periodic": true,
-            "period_ms": 120
+            "period_ms": 40.333607912063599
         },
         {
             "name": "task2",
@@ -17,7 +17,7 @@
             "address": "selected_models/resnet50",
             "data": "CIFAR10",
             "if_periodic": true,
-            "period_ms": 180
+            "period_ms": 75.447167992591858
         },
         {
             "name": "task3",
@@ -25,7 +25,7 @@
             "address": "selected_models/mobilenet_v3_large",
             "data": "CIFAR10",
             "if_periodic": true,
-            "period_ms": 300
+            "period_ms": 83.810782885551454
         },
         {
             "name": "task4",
@@ -33,7 +33,7 @@
             "address": "selected_models/vit_b_16",
             "data": "CIFAR10",
             "if_periodic": true,
-            "period_ms": 100
+            "period_ms": 131.327517579340938
         },
         {
             "name": "task5",
@@ -41,8 +41,8 @@
             "address": "selected_models/resnet50",
             "data": "CIFAR10",
             "if_periodic": false,
-            "possion_lambda": 80,
-            "deadline_ms": 240
+            "possion_lambda": 96,
+            "deadline_ms": 98.011201478958128
         },
         {
             "name": "task6",
@@ -50,8 +50,8 @@
             "address": "selected_models/vit_b_16",
             "data": "CIFAR10",
             "if_periodic": false,
-            "possion_lambda": 60,
-            "deadline_ms": 240
+            "possion_lambda": 93.27517579340938,
+            "deadline_ms": 97.7517579340938
         }
     ]
 }

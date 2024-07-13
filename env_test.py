@@ -25,25 +25,6 @@ from environment import DLSchedulingEnv
 from sb3_contrib.common.maskable.utils import get_action_masks
 
 
-class StopTrainingOnTimeLimit(BaseCallback):
-    def __init__(self, time_limit_seconds: int, verbose=0):
-        super(StopTrainingOnTimeLimit, self).__init__(verbose)
-        self.time_limit_seconds = time_limit_seconds
-        self.start_time = None
-
-    def _on_training_start(self) -> None:
-        self.start_time = time.time()
-
-    def _on_step(self) -> bool:
-        if time.time() - self.start_time >= self.time_limit_seconds:
-            print("Time limit reached.")
-            return False  # Returning False stops the training
-        return True
-
-    def _on_training_end(self) -> None:
-        print("Training stopped due to time limit.")
-
-
 if __name__ == "__main__":
     for _device in ["cpu", "cuda"]:
         env = DLSchedulingEnv(
@@ -69,15 +50,17 @@ if __name__ == "__main__":
             env,
             best_model_save_path="./logs/",
             log_path="./logs/",
-            eval_freq=500,
+            eval_freq=30000,
             deterministic=True,
             render=False,
         )
-        stopTrainingOnTimeLimit: StopTrainingOnTimeLimit = StopTrainingOnTimeLimit(10)
         env.reset()
         model.learn(
-            total_timesteps=100000, callback=[stopTrainingOnTimeLimit, eval_callback]
+            total_timesteps=10000,
+            progress_bar=True,
+            callback=eval_callback,
         )
+        print("Saving model")
         model.save("ppo_dl_scheduling" + _device)
         obs = env.reset()
         predict_times: List[float] = []

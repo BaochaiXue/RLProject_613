@@ -8,3 +8,5 @@ logs
 draft.ipynb
 __pycache__/environment.cpython-310.pyc
 ppo_dl_scheduling.zip
+ppo_dl_schedulingcpu.zip
+ppo_dl_schedulingcuda.zip
