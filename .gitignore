@@ -15,3 +15,6 @@ DMI_logs.csv
 FIFO_logs.csv
 STF_logs.csv
 __pycache__/env_detail.cpython-310.pyc
+my_log
+__pycache__
+RL_models

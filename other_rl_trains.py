@@ -19,9 +19,11 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import EvalCallback
 import pynvml
-from stable_baselines3.common.callbacks import BaseCallback
 import warnings
+from sb3_contrib import ARS
 
+
+warnings.filterwarnings("ignore")
 pynvml.nvmlInit()
 avg_predict_time: float = 1.468617820739746
 std_predict_time: float = 5.535014694757007
@@ -96,7 +98,7 @@ def get_gpu_resources() -> Tuple[float, float]:
     return avg_gpu_util / 100.0, avg_mem_util / 100.0
 
 
-class DLSchedulingEnv(gym.Env):
+class FlattenDLSchedulingEnv(gym.Env):
     def _models_self_test(self) -> None:
         if_training: bool = self.if_training
         self.if_training = True
@@ -133,7 +135,9 @@ class DLSchedulingEnv(gym.Env):
             for var_id1 in range(self.num_variants):
                 for task_id2 in range(self.num_tasks + 1):
                     for var_id2 in range(self.num_variants):
-                        action = np.array([task_id1, var_id1, task_id2, var_id2])
+                        action = self.encode_action(
+                            np.array([task_id1, var_id1, task_id2, var_id2])
+                        )
                         obs, reward, done, tun, info = self.step(action)
                         if done:
                             self.reset()
@@ -147,7 +151,7 @@ class DLSchedulingEnv(gym.Env):
         if_training: bool = False,
         test_name: str = "DQN",
     ) -> None:
-        super(DLSchedulingEnv, self).__init__()
+        super(FlattenDLSchedulingEnv, self).__init__()
         self.test_round_cnt: int = 0
         self.test_name: str = test_name
         self.if_training: bool = if_training
@@ -275,15 +279,7 @@ class DLSchedulingEnv(gym.Env):
         return np.array(runtimes), np.array(accuracies)
 
     def define_spaces(self) -> None:
-        self.action_space: spaces.MultiDiscrete = spaces.MultiDiscrete(
-            [
-                self.num_tasks + 1,
-                self.num_tasks + 1,
-                self.num_tasks + 1,
-                self.num_tasks + 1,
-            ]
-        )
-
+        self.action_space: spaces.Discrete = spaces.Discrete((self.num_tasks + 1) ** 4)
         self.observation_space: spaces.Dict = spaces.Dict(
             {
                 "current_streams_status": spaces.MultiBinary(2),
@@ -298,6 +294,21 @@ class DLSchedulingEnv(gym.Env):
                 ),
             }
         )
+
+    def encode_action(self, action: np.ndarray) -> int:
+        encoded_action = 0
+        multiplier = 1
+        for i in range(len(action)):
+            encoded_action += action[i] * multiplier
+            multiplier *= self.num_tasks + 1
+        return encoded_action
+
+    def decode_action(self, encoded_action: int) -> np.ndarray:
+        action = np.zeros(4, dtype=int)
+        for i in range(4):
+            action[i] = encoded_action % (self.num_tasks + 1)
+            encoded_action //= self.num_tasks + 1
+        return action
 
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
@@ -403,8 +414,9 @@ class DLSchedulingEnv(gym.Env):
         )
 
     def step(
-        self, action: np.ndarray
+        self, encoded_action: int
     ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+        action = self.decode_action(encoded_action)
         if self.if_training:
             current_time: float = time.time() * 1000
             if (
@@ -560,52 +572,6 @@ class DLSchedulingEnv(gym.Env):
             return
         self._logs.to_csv(f"{self.test_name}_logs.csv", index=False)
 
-    def valid_action_mask(self) -> np.ndarray:
-        task_mask1 = (
-            np.array([True] * self.num_tasks + [False], dtype=np.bool_)
-            if not self.stream_is_busy[0]
-            else np.array([False] * self.num_tasks + [True], dtype=np.bool_)
-        )
-        task_mask2 = (
-            np.array([True] * self.num_tasks + [False], dtype=np.bool_)
-            if not self.stream_is_busy[1]
-            else np.array([False] * self.num_tasks + [True], dtype=np.bool_)
-        )
-        variant_mask1 = np.array([True] * (self.num_tasks + 1), dtype=np.bool_)
-        variant_mask2 = np.array([True] * (self.num_tasks + 1), dtype=np.bool_)
-
-        if self.num_variants < self.num_tasks:
-            variant_mask1[self.num_variants :] = False
-            variant_mask2[self.num_variants :] = False
-        if self.num_variants > self.num_tasks:
-            raise ValueError("Number of variants should be less than or equal to tasks")
-
-        for i in range(self.num_tasks):
-            if not self.task_arrived[i] or self.current_task_pointer[i] >= len(
-                self.task_queues[i]
-            ):
-                task_mask1[i] = False
-                task_mask2[i] = False
-
-        if not np.any(task_mask1[: self.num_tasks]):
-            task_mask1[self.num_tasks] = True
-            variant_mask1[:] = False
-            variant_mask1[0] = True
-        else:
-            task_mask1[self.num_tasks] = False
-
-        if not np.any(task_mask2[: self.num_tasks]):
-            task_mask2[self.num_tasks] = True
-            variant_mask2[:] = False
-            variant_mask2[0] = True
-        else:
-            task_mask2[self.num_tasks] = False
-
-        action_mask = np.array(
-            [task_mask1, variant_mask1, task_mask2, variant_mask2], dtype=np.bool_
-        )
-        return action_mask
-
     def render(self, mode: str = "human") -> None:
         total_task_finished: int = np.sum(self.total_tasks_count)
         total_task_accurate: int = np.sum(self.total_task_accurate)
@@ -637,8 +603,11 @@ class DLSchedulingEnv(gym.Env):
         self.test_round_cnt += 1
 
 
-if __name__ == "__main__":
-    env: DLSchedulingEnv = DLSchedulingEnv(
+time_step_of_training: int = 10000
+
+
+def train_dqn(time_step_of_traning: int) -> None:
+    env: FlattenDLSchedulingEnv = FlattenDLSchedulingEnv(
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=True,
@@ -647,7 +616,7 @@ if __name__ == "__main__":
 
     device: torch.device = torch.device("cpu")
     model: DQN = DQN(
-        "MlpPolicy",
+        "MultiInputPolicy",
         env,
         verbose=1,
         tensorboard_log="./logs/",
@@ -659,16 +628,18 @@ if __name__ == "__main__":
         env,
         best_model_save_path="./logs/",
         log_path="./logs/",
-        eval_freq=10000,
+        eval_freq=10000000,
         deterministic=True,
         render=False,
     )
     env.reset()
-    model.learn(total_timesteps=100000, callback=eval_callback, progress_bar=True)
+    model.learn(
+        total_timesteps=time_step_of_training, callback=eval_callback, progress_bar=True
+    )
     model.save("dqn_dl_scheduling")
     model = DQN.load("dqn_dl_scheduling")
     env.close()
-    env = DLSchedulingEnv(
+    env = FlattenDLSchedulingEnv(
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=False,
@@ -678,7 +649,55 @@ if __name__ == "__main__":
     for i in range(10000):
         action, _states = model.predict(obs, deterministic=True)
         obs, rewards, dones, info = env.step(action)
+        if dones:
+            obs = env.reset()
+            break
+    env.close()
 
+
+def train_ars(time_step_of_training: int) -> None:
+    env: FlattenDLSchedulingEnv = FlattenDLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=True,
+    )
+    env = make_vec_env(lambda: env, n_envs=1)
+
+    device: torch.device = torch.device("cpu")
+    model: ARS = ARS(
+        "MultiInputPolicy",
+        env,
+        verbose=1,
+        tensorboard_log="./logs/",
+        device=device,
+        learning_rate=0.0003,
+    )
+
+    eval_callback: EvalCallback = EvalCallback(
+        env,
+        best_model_save_path="./logs/",
+        log_path="./logs/",
+        eval_freq=10000000,
+        deterministic=True,
+        render=False,
+    )
+    env.reset()
+    model.learn(
+        total_timesteps=time_step_of_training, callback=eval_callback, progress_bar=True
+    )
+    model.save("ars_dl_scheduling")
+    model = ARS.load("ars_dl_scheduling")
+    env.close()
+    env = FlattenDLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+    )
+    env = make_vec_env(lambda: env, n_envs=1)
+    obs = env.reset()
+    for i in range(10000):
+        action, _states = model.predict(obs, deterministic=True)
+        obs, rewards, dones, info = env.step(action)
         if dones:
             obs = env.reset()
             break

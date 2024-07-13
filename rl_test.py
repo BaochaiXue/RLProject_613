@@ -25,6 +25,9 @@ from environment import DLSchedulingEnv
 from sb3_contrib.common.maskable.utils import get_action_masks
 import warnings
 from env_detail import DetailedDLSchedulingEnv
+from other_rl_trains import FlattenDLSchedulingEnv
+from stable_baselines3 import DQN
+from sb3_contrib import ARS
 
 warnings.filterwarnings("ignore")
 
@@ -240,16 +243,30 @@ def test_FIFO():
     env.close()
 
 
+def test_DQN():
+    model = DQN.load("dqn_dl_scheduling")
+    env = FlattenDLSchedulingEnv(
+        config_file="config.json",
+        model_info_file="model_information.csv",
+        if_training=False,
+    )
+    env = make_vec_env(lambda: env, n_envs=1)
+    obs = env.reset()
+    for i in range(10000):
+        action, _states = model.predict(obs, deterministic=True)
+        obs, rewards, dones, info = env.step(action)
+        if dones:
+            obs = env.reset()
+            break
+    env.close()
+
+
 if __name__ == "__main__":
-    test_list: List[str] = ["MPPO", "DM", "DMI", "STF", "FIFO"]
+    test_list: List[str] = ["MPPO", "DQN"]
     print("Testing MPPO")
     test_MPPO()
-    print("Testing DM")
-    test_DM()
-    print("Testing STF")
-    test_STF()
-    print("Testing FIFO")
-    test_FIFO()
+    print("Testing DQN")
+    test_DQN()
     for test_name in test_list:
         # read the log file
         log_file = f"{test_name}_logs.csv"
