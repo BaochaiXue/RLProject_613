@@ -739,7 +739,7 @@ def train_QRDQN(time_step_of_training: int) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: environment.py <param1> <param2>")
+        print("Usage: environment.py <param1> ")
     time_step_of_training: int = int(sys.argv[1])
     train_dqn(time_step_of_training * 2)
     train_QRDQN(time_step_of_training // 8)

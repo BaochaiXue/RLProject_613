@@ -318,7 +318,7 @@ if __name__ == "__main__":
         "PPO",
         "QRDQN",
     ]
-    test_list: List[str] = ["TRPO", "A2C", "PPO", "QRDQN"]
+
     for test_name in test_list:
         print(f"Testing {test_name}")
         if test_name == "MPPO":

@@ -880,7 +880,7 @@ def train_A2C(time_step_of_training: int) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: environment.py <param1> <param2>")
+        print("Usage: environment.py <param1> ")
     time_step_of_training: int = int(sys.argv[1])
     train_MaskablePPO(time_step_of_training)
     train_TRPO(time_step_of_training)
