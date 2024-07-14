@@ -25,7 +25,7 @@ def call_script(script_name: str, param: int | None) -> None:
 
 
 if __name__ == "__main__":
-    time_step_of_training: int = 1000
+    time_step_of_training: int = 100000
     scripts: List[str] = ["environment.py", "other_rl_trains.py", "rl_test.py"]
     call_script(scripts[0], time_step_of_training)
     call_script(scripts[1], time_step_of_training)

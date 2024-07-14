@@ -45,6 +45,7 @@ def test_MPPO():
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=False,
+        test_name="MPPO",
     )
     env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
@@ -75,6 +76,7 @@ def test_DM():
     obs: np.ndarray
     info: Dict[str, Any]
     obs, info = env.reset()
+    have_reset: bool = False
     for i in range(10000):
         action: np.ndarray
         num_tasks: int = env.num_tasks
@@ -99,8 +101,9 @@ def test_DM():
             )
         obs, rewards, dones, tun, info = env.step(action)
         # time.sleep(0.001)
-        if dones:
+        if dones or (i == 9999 and not have_reset):
             obs, info = env.reset()
+            have_reset = True
     env.close()
 
 
@@ -216,6 +219,7 @@ def test_DQN():
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=False,
+        test_name="DQN",
     )
     env = make_vec_env(lambda: env, n_envs=1)
     obs = env.reset()
@@ -233,6 +237,7 @@ def test_TRPO():
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=False,
+        test_name="TRPO",
     )
     env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
@@ -255,6 +260,7 @@ def test_A2C():
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=False,
+        test_name="A2C",
     )
     env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
@@ -275,6 +281,7 @@ def test_PPO():
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=False,
+        test_name="PPO",
     )
     env = ActionMasker(env, lambda env: env.valid_action_mask())
     env = make_vec_env(lambda: env, n_envs=1)
@@ -295,6 +302,7 @@ def test_QRDQN():
         config_file="config.json",
         model_info_file="model_information.csv",
         if_training=False,
+        test_name="QRDQN",
     )
     env = make_vec_env(lambda: env, n_envs=1)
     obs = env.reset()
