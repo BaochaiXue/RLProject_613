@@ -16,70 +16,109 @@ from torchvision import datasets, transforms
 from torch import nn
 import threading
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3 import DQN
-from stable_baselines3.common.callbacks import EvalCallback
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
+from sb3_contrib.common.wrappers import ActionMasker
 import pynvml
-import warnings
-from sb3_contrib import ARS
-from stable_baselines3.common.torch_layers import (
-    FlattenExtractor,
-    BaseFeaturesExtractor,
-)
-import torch.nn.functional as F
+from stable_baselines3.common.callbacks import BaseCallback
+from sb3_contrib.common.maskable.utils import get_action_masks
+from sb3_contrib import TRPO
 from stable_baselines3 import PPO
+import warnings
+import pandas as pd
+from stable_baselines3 import A2C
 from stable_baselines3.common.env_util import make_vec_env
-from sb3_contrib import QRDQN
+from stable_baselines3.common.vec_env import SubprocVecEnv
 import sys
 
-warnings.filterwarnings("ignore")
+# warnings.filterwarnings("ignore")
+#hyperparameters kind 2
 pynvml.nvmlInit()
-avg_predict_time: float = 1.468617820739746
-std_predict_time: float = 2.535014694757007
+avg_predict_time: float = 1.22059
+std_predict_time: float = 0.150174
 
 
-def load_testset(vit_16_using: bool) -> datasets.CIFAR10:
-    transform = (
-        transforms.Compose(
-            [
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
-                ),
-            ]
+def load_testset(vit_16_using: bool, dataset_name: str) -> Any:
+    if dataset_name == "CIFAR10":
+        transform = (
+            transforms.Compose(
+                [
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
+                    ),
+                ]
+            )
+            if vit_16_using
+            else transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
+                    ),
+                ]
+            )
         )
-        if vit_16_using
-        else transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]
-                ),
-            ]
-        )
-    )
 
-    testset: datasets.CIFAR10 = datasets.CIFAR10(
-        root="./data", train=False, transform=transform, download=True
-    )
+        testset = datasets.CIFAR10(
+            root="./data", train=False, transform=transform, download=True
+        )
+    elif dataset_name == "GTSRB":
+        transform = (
+            transforms.Compose(
+                [
+                    transforms.Resize((32, 32)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.3403, 0.3121, 0.3214], std=[0.2724, 0.2608, 0.2669]
+                    ),
+                ]
+            )
+            if not vit_16_using
+            else transforms.Compose(
+                [
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.3403, 0.3121, 0.3214], std=[0.2724, 0.2608, 0.2669]
+                    ),
+                ]
+            )
+        )
+
+        testset = datasets.GTSRB(
+            root="./data", split="test", transform=transform, download=True
+        )
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
+
     return testset
 
 
-testset_non_vit: datasets.CIFAR10 = load_testset(False)
-testset_vit: datasets.CIFAR10 = load_testset(True)
+testset_non_vit: datasets.CIFAR10 = load_testset(False, "CIFAR10")
+testset_vit: datasets.CIFAR10 = load_testset(True, "CIFAR10")
+testset_gtsrb: datasets.GTSRB = load_testset(False, "GTSRB")
 
 
-def load_single_test_image(vit_16_using: bool) -> DataLoader:
-    testset: datasets.CIFAR10 = testset_vit if vit_16_using else testset_non_vit
-    random_index: int = random.randint(0, len(testset) - 1)
-    test_subset: Subset = Subset(testset, [random_index])
-    testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
-    return testloader
+def load_single_test_image(vit_16_using: bool, dataset_name: str = "CIFAR10") -> Any:
+    if dataset_name == "CIFAR10":
+        testset: datasets.CIFAR10 = testset_vit if vit_16_using else testset_non_vit
+        random_index: int = random.randint(0, len(testset) - 1)
+        test_subset: Subset = Subset(testset, [random_index])
+        testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
+        return testloader
+    elif dataset_name == "GTSRB":
+        testset: datasets.GTSRB = testset_gtsrb
+        random_index: int = random.randint(0, len(testset) - 1)
+        test_subset: Subset = Subset(testset, [random_index])
+        testloader: DataLoader = DataLoader(test_subset, batch_size=1, shuffle=False)
+        return testloader
 
 
-def load_model(model_name: str, model_number: int) -> nn.Module:
+def load_model(model_name: str, model_number: int, dataset_name: str) -> nn.Module:
     model_file: str = (
-        f"selected_models/{model_name}/{model_name}_cifar10_{model_number}.pth"
+        f"selected_models/{model_name}/{model_name}_{dataset_name}_{model_number}.pth"
     )
     if not os.path.exists(model_file):
         raise FileNotFoundError(f"Model file {model_file} not found.")
@@ -106,7 +145,7 @@ def get_gpu_resources() -> Tuple[float, float]:
     return avg_gpu_util / 100.0, avg_mem_util / 100.0
 
 
-class FlattenDLSchedulingEnv(gym.Env):
+class DLSchedulingEnv(gym.Env):
     def _models_self_test(self) -> None:
         if_training: bool = self.if_training
         self.if_training = True
@@ -143,9 +182,7 @@ class FlattenDLSchedulingEnv(gym.Env):
             for var_id1 in range(self.num_variants):
                 for task_id2 in range(self.num_tasks + 1):
                     for var_id2 in range(self.num_variants):
-                        action = self.encode_action(
-                            np.array([task_id1, var_id1, task_id2, var_id2])
-                        )
+                        action = np.array([task_id1, var_id1, task_id2, var_id2])
                         obs, reward, done, tun, info = self.step(action)
                         if done:
                             self.reset()
@@ -157,9 +194,9 @@ class FlattenDLSchedulingEnv(gym.Env):
         config_file: str,
         model_info_file: str,
         if_training: bool = False,
-        test_name: str = "DQN",
+        test_name: str = "MPPO",
     ) -> None:
-        super(FlattenDLSchedulingEnv, self).__init__()
+        super(DLSchedulingEnv, self).__init__()
         self.test_round_cnt: int = 0
         self.test_name: str = test_name
         self.if_training: bool = if_training
@@ -198,7 +235,9 @@ class FlattenDLSchedulingEnv(gym.Env):
         for model_name in self.model_name_set:
             for variant_id in range(self.num_variants):
                 self.models[(model_name, variant_id)] = load_model(
-                    model_name, variant_id + 1
+                    model_name,
+                    variant_id + 1,
+                    "cifar10" if "alexnet" not in model_name else "GTSRB",
                 )
                 self.models[(model_name, variant_id)].to("cuda:0")
         self.locks: List[threading.Lock] = [
@@ -208,6 +247,7 @@ class FlattenDLSchedulingEnv(gym.Env):
         self._models_self_test()
         self._step_self_test()
         self._logs: pd.DataFrame = pd.DataFrame()
+        # columns are test_count task_id total_task_count, total_task_accurate, total_missed_deadlines, total_task_actual_inference
         self.start_time = time.time() * 1000
 
     def generate_task_queues(self) -> Dict[int, List[Dict[str, Any]]]:
@@ -287,7 +327,15 @@ class FlattenDLSchedulingEnv(gym.Env):
         return np.array(runtimes), np.array(accuracies)
 
     def define_spaces(self) -> None:
-        self.action_space: spaces.Discrete = spaces.Discrete((self.num_tasks + 1) ** 4)
+        self.action_space: spaces.MultiDiscrete = spaces.MultiDiscrete(
+            [
+                self.num_tasks + 1,
+                self.num_tasks + 1,
+                self.num_tasks + 1,
+                self.num_tasks + 1,
+            ]
+        )
+
         self.observation_space: spaces.Dict = spaces.Dict(
             {
                 "current_streams_status": spaces.MultiBinary(2),
@@ -302,21 +350,6 @@ class FlattenDLSchedulingEnv(gym.Env):
                 ),
             }
         )
-
-    def encode_action(self, action: np.ndarray) -> int:
-        encoded_action = 0
-        multiplier = 1
-        for i in range(len(action)):
-            encoded_action += action[i] * multiplier
-            multiplier *= self.num_tasks + 1
-        return encoded_action
-
-    def decode_action(self, encoded_action: int) -> np.ndarray:
-        action = np.zeros(4, dtype=int)
-        for i in range(4):
-            action[i] = encoded_action % (self.num_tasks + 1)
-            encoded_action //= self.num_tasks + 1
-        return action
 
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
@@ -392,7 +425,9 @@ class FlattenDLSchedulingEnv(gym.Env):
         deadline: float,
     ) -> Tuple[int, int]:
         model: nn.Module = self.models[(task["model"], variant_id)]
-        dataloader: DataLoader = load_single_test_image("vit" in task["model"])
+        dataloader: DataLoader = load_single_test_image(
+            "vit" in task["model"], "CIFAR10"
+        )
         device: torch.device = torch.device("cuda:0")
         stream: torch.cuda.Stream = self.streams[stream_index]
         penalty_function: Callable[[float], float] = lambda x: (
@@ -422,9 +457,8 @@ class FlattenDLSchedulingEnv(gym.Env):
         )
 
     def step(
-        self, encoded_action: int
+        self, action: np.ndarray
     ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
-        action = self.decode_action(encoded_action)
         if self.if_training:
             current_time: float = time.time() * 1000
             if (
@@ -557,6 +591,7 @@ class FlattenDLSchedulingEnv(gym.Env):
             "task_deadlines": np.array(task_ddls, dtype=np.float32),
             "gpu_resources": np.array(gpu_resources, dtype=np.float32),
         }
+        # all tasks_pointer reached end of queue, and all tasks are idle
         done: bool = all(
             [
                 self.current_task_pointer[task_id] >= len(queue)
@@ -567,8 +602,11 @@ class FlattenDLSchedulingEnv(gym.Env):
         info: Dict[str, Any] = {}
         if self.if_training:
             self.train_time_record = time.time() * 1000
+        # print(f"Task Arrived: {self.task_arrived}")
+        # print(f"ACTION: {action}, REWARD: {reward}")
         if not self.if_training and done:
             self.render("human")
+        # print(f"Step Time: {time.time() * 1000 - start_step_time}")
         return observation, reward, done, done, info
 
     def close(self) -> None:
@@ -579,6 +617,52 @@ class FlattenDLSchedulingEnv(gym.Env):
         if self.if_training:
             return
         self._logs.to_csv(f"my_log/{self.test_name}_logs.csv", index=False)
+
+    def valid_action_mask(self) -> np.ndarray:
+        task_mask1 = (
+            np.array([True] * self.num_tasks + [False], dtype=np.bool_)
+            if not self.stream_is_busy[0]
+            else np.array([False] * self.num_tasks + [True], dtype=np.bool_)
+        )
+        task_mask2 = (
+            np.array([True] * self.num_tasks + [False], dtype=np.bool_)
+            if not self.stream_is_busy[1]
+            else np.array([False] * self.num_tasks + [True], dtype=np.bool_)
+        )
+        variant_mask1 = np.array([True] * (self.num_tasks + 1), dtype=np.bool_)
+        variant_mask2 = np.array([True] * (self.num_tasks + 1), dtype=np.bool_)
+
+        if self.num_variants < self.num_tasks:
+            variant_mask1[self.num_variants :] = False
+            variant_mask2[self.num_variants :] = False
+        if self.num_variants > self.num_tasks:
+            raise ValueError("Number of variants should be less than or equal to tasks")
+
+        for i in range(self.num_tasks):
+            if not self.task_arrived[i] or self.current_task_pointer[i] >= len(
+                self.task_queues[i]
+            ):
+                task_mask1[i] = False
+                task_mask2[i] = False
+
+        if not np.any(task_mask1[: self.num_tasks]):
+            task_mask1[self.num_tasks] = True
+            variant_mask1[:] = False
+            variant_mask1[0] = True
+        else:
+            task_mask1[self.num_tasks] = False
+
+        if not np.any(task_mask2[: self.num_tasks]):
+            task_mask2[self.num_tasks] = True
+            variant_mask2[:] = False
+            variant_mask2[0] = True
+        else:
+            task_mask2[self.num_tasks] = False
+
+        action_mask = np.array(
+            [task_mask1, variant_mask1, task_mask2, variant_mask2], dtype=np.bool_
+        )
+        return action_mask
 
     def render(self, mode: str = "human") -> None:
         total_task_finished: int = np.sum(self.total_tasks_count)
@@ -607,143 +691,110 @@ class FlattenDLSchedulingEnv(gym.Env):
                     task_id
                 ],
             }
+            # as the next column
             self._logs = pd.concat([self._logs, pd.DataFrame([row])], ignore_index=True)
         self.test_round_cnt += 1
 
 
-class CustomCombinedExtractor(BaseFeaturesExtractor):
-    def __init__(self, observation_space: gym.spaces.Dict):
-        super(CustomCombinedExtractor, self).__init__(observation_space, features_dim=1)
-        extractors = {}
+def train_TRPO(time_step_of_training: int, test_kind: str) -> None:
+    worloads: List[str] = ["lw", "mw", "hw"]
+    for workload in worloads:
+        env: DLSchedulingEnv = DLSchedulingEnv(
+            config_file=f"config_{workload}.json",
+            model_info_file="model_information.csv",
+            if_training=True,
+            test_name=f"TRPO_{test_kind}_{workload}",
+        )
+        env = make_vec_env(lambda: env, n_envs=1)
 
-        for key, subspace in observation_space.spaces.items():
-            if isinstance(subspace, gym.spaces.Box):
-                if len(subspace.shape) == 1:
-                    extractors[key] = nn.Linear(subspace.shape[0], 64)
-                else:
-                    raise NotImplementedError(f"Unsupported shape {subspace.shape}")
-            elif isinstance(subspace, gym.spaces.MultiBinary):
-                extractors[key] = nn.Linear(subspace.shape[0], 64)
-            else:
-                raise NotImplementedError(f"Unsupported space type: {type(subspace)}")
+        device: torch.device = torch.device("cpu")
+        model: TRPO = TRPO(
+            "MultiInputPolicy",
+            env,
+            verbose=1,
+            tensorboard_log="./logs/",
+            device=device,
+            learning_rate=0.0003,
+        )
 
-        self.extractors = nn.ModuleDict(extractors)
-        self._features_dim = sum([64 for _ in self.extractors.values()])
+        env.reset()
+        model.learn(total_timesteps=time_step_of_training, progress_bar=True)
+        model.save(f"gp_ngp_models/trpo_{test_kind}_{workload}")
+        model = TRPO.load(f"gp_ngp_models/trpo_{test_kind}_{workload}")
+        env.close()
+        env = DLSchedulingEnv(
+            config_file=f"config_{workload}.json",
+            model_info_file="model_information.csv",
+            if_training=False,
+            test_name=f"TRPO_{test_kind}_{workload}",
+        )
+        env = ActionMasker(env, lambda env: env.valid_action_mask())
+        env = make_vec_env(lambda: env, n_envs=1)
+        obs = env.reset()
+        for i in range(10000):
+            action: np.ndarray
+            action, _states = model.predict(obs, deterministic=True)
+            obs, rewards, dones, info = env.step(action)
 
-    def forward(self, observations) -> torch.Tensor:
-        encoded_tensor_list = []
-        for key, extractor in self.extractors.items():
-            encoded_tensor_list.append(F.relu(extractor(observations[key])))
-        return torch.cat(encoded_tensor_list, dim=1)
-
-
-def train_dqn(time_step_of_traning: int) -> None:
-    env: FlattenDLSchedulingEnv = FlattenDLSchedulingEnv(
-        config_file="config.json",
-        model_info_file="model_information.csv",
-        if_training=True,
-        test_name="DQN",
-    )
-    env = make_vec_env(lambda: env, n_envs=1)
-
-    device: torch.device = torch.device("cpu")
-    model: DQN = DQN(
-        "MultiInputPolicy",
-        env,
-        verbose=1,
-        tensorboard_log="./logs/",
-        device=device,
-        learning_rate=0.0003,
-    )
-
-    eval_callback: EvalCallback = EvalCallback(
-        env,
-        best_model_save_path="./logs/",
-        log_path="./logs/",
-        eval_freq=10000000,
-        deterministic=True,
-        render=False,
-    )
-    env.reset()
-    model.learn(
-        total_timesteps=time_step_of_training * 2,
-        callback=eval_callback,
-        progress_bar=True,
-    )
-    model.save("RL_models/dqn_dl_scheduling")
-    model = DQN.load("RL_models/dqn_dl_scheduling")
-    env.close()
-    env = FlattenDLSchedulingEnv(
-        config_file="config.json",
-        model_info_file="model_information.csv",
-        if_training=False,
-    )
-    env = make_vec_env(lambda: env, n_envs=1)
-    obs = env.reset()
-    for i in range(10000):
-        action, _states = model.predict(obs, deterministic=True)
-        obs, rewards, dones, info = env.step(action)
-        if dones:
-            obs = env.reset()
-            break
-    env.close()
+            if dones:
+                obs = env.reset()
+                break
+        env.close()
 
 
-def train_QRDQN(time_step_of_training: int) -> None:
-    env: FlattenDLSchedulingEnv = FlattenDLSchedulingEnv(
-        config_file="config.json",
-        model_info_file="model_information.csv",
-        if_training=True,
-        test_name="QRDQN",
-    )
-    env = make_vec_env(lambda: env, n_envs=1)
+def train_PPO(time_step_of_training: int, test_kind: str) -> None:
+    worloads: List[str] = ["lw", "mw", "hw"]
+    for workload in worloads:
+        env: DLSchedulingEnv = DLSchedulingEnv(
+            config_file=f"config_{workload}.json",
+            model_info_file="model_information.csv",
+            if_training=True,
+            test_name=f"PPO_{test_kind}_{workload}",
+        )
+        env = make_vec_env(lambda: env, n_envs=1)
 
-    device: torch.device = torch.device("cpu")
-    model: QRDQN = QRDQN(
-        "MultiInputPolicy",
-        env,
-        verbose=1,
-        tensorboard_log="./logs/",
-        device=device,
-        learning_rate=0.0003,
-    )
+        device: torch.device = torch.device("cpu")
+        model: PPO = PPO(
+            "MultiInputPolicy",
+            env,
+            verbose=1,
+            tensorboard_log="./logs/",
+            device=device,
+            learning_rate=0.0003,
+        )
 
-    eval_callback: EvalCallback = EvalCallback(
-        env,
-        best_model_save_path="./logs/",
-        log_path="./logs/",
-        eval_freq=10000000,
-        deterministic=True,
-        render=False,
-    )
-    env.reset()
-    model.learn(
-        total_timesteps=time_step_of_training // 40,
-        callback=eval_callback,
-        progress_bar=True,
-    )
-    model.save("RL_models/qrdqn_dl_scheduling")
-    model = QRDQN.load("RL_models/qrdqn_dl_scheduling")
-    env.close()
-    env = FlattenDLSchedulingEnv(
-        config_file="config.json",
-        model_info_file="model_information.csv",
-        if_training=False,
-    )
-    env = make_vec_env(lambda: env, n_envs=1)
-    obs = env.reset()
-    for i in range(10000):
-        action, _states = model.predict(obs, deterministic=True)
-        obs, rewards, dones, info = env.step(action)
-        if dones:
-            obs = env.reset()
-            break
-    env.close()
+        env.reset()
+        model.learn(total_timesteps=time_step_of_training, progress_bar=True)
+        model.save(f"gp_ngp_models/ppo_{test_kind}_{workload}")
+        model = PPO.load(f"gp_ngp_models/ppo_{test_kind}_{workload}")
+        env.close()
+        env = DLSchedulingEnv(
+            config_file=f"config_{workload}.json",
+            model_info_file="model_information.csv",
+            if_training=False,
+            test_name=f"PPO_{test_kind}_{workload}",
+        )
+        env = ActionMasker(env, lambda env: env.valid_action_mask())
+        env = make_vec_env(lambda: env, n_envs=1)
+        obs = env.reset()
+        for i in range(10000):
+            action: np.ndarray
+            action, _states = model.predict(obs, deterministic=True)
+            obs, rewards, dones, info = env.step(action)
+
+            if dones:
+                obs = env.reset()
+                break
+        env.close()
 
 
 if __name__ == "__main__":
+    test_kind: str = "gp"
+    if not os.path.exists("gp_ngp_models"):
+        os.makedirs("gp_ngp_models")
     if len(sys.argv) != 2:
         print("Usage: environment.py <param1> ")
+        raise ValueError("Invalid number of arguments")
     time_step_of_training: int = int(sys.argv[1])
-    train_dqn(time_step_of_training)
-    train_QRDQN(time_step_of_training)
+    train_TRPO(time_step_of_training, test_kind)
+    train_PPO(time_step_of_training, test_kind)

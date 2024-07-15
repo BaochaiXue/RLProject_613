@@ -10,7 +10,7 @@
             "data": "CIFAR10",
             "if_periodic": false,
             "possion_lambda": 15,
-            "deadline_ms": 15
+            "deadline_ms": 8
         },
         {
             "name": "task2",
@@ -19,7 +19,7 @@
             "data": "CIFAR10",
             "if_periodic": false,
             "possion_lambda": 45,
-            "deadline_ms": 30
+            "deadline_ms": 24
         },
         {
             "name": "task3",
@@ -27,7 +27,7 @@
             "address": "selected_models/mobilenet_v3_large",
             "data": "CIFAR10",
             "if_periodic": true,
-            "period_ms": 50
+            "period_ms": 48
         },
         {
             "name": "task4",
@@ -43,8 +43,8 @@
             "address": "selected_models/resnet50",
             "data": "CIFAR10",
             "if_periodic": false,
-            "possion_lambda": 80,
-            "deadline_ms": 20
+            "possion_lambda": 78,
+            "deadline_ms": 16
         },
         {
             "name": "task6",
@@ -52,7 +52,7 @@
             "address": "selected_models/vit_b_16",
             "data": "CIFAR10",
             "if_periodic": false,
-            "possion_lambda": 80,
+            "possion_lambda": 72,
             "deadline_ms": 55
         },
         {

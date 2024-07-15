@@ -1,0 +1,148 @@
+Very Light Load on server:
+Test MPPO accuracy: 0.7547573230703443, missed deadlines: 0.07093156090975179
+Test DQN accuracy: 0.7277955271565495, missed deadlines: 0.24922118380062305
+Test TRPO accuracy: 0.7808333333333334, missed deadlines: 0.004574755666458723
+Test A2C accuracy: 0.7589211618257261, missed deadlines: 0.0016573441060700228
+Test PPO accuracy: 0.7494252873563219, missed deadlines: 0.006443566826023696
+Test QRDQN accuracy: 0.7898989898989899, missed deadlines: 0.5186335403726708
+
+Test DM accuracy: 0.7396265560165975, missed deadlines: 0.0
+Test STF accuracy: 0.7396049896049897, missed deadlines: 0.0
+Test FIFO accuracy: 0.7460978147762747, missed deadlines: 0.001040582726326743
+
+Very Light Load on Local:
+Test MPPO accuracy: 0.7110337972166998, missed deadlines: 0.3807332640641235
+Task 0 accuracy: 0.7912864292022372, missed deadlines: 0.198005698005698
+Test MPPO mean inference time: 0.010999186277389526, std inference time: 0.004124400366572474
+Task 1 accuracy: 0.6218985976267529, missed deadlines: 0.08809396689802455
+Test MPPO mean inference time: 0.010999186277389526, std inference time: 0.004124400366572474
+Task 2 accuracy: 0.591726618705036, missed deadlines: 0.1357733175914994
+Test MPPO mean inference time: 0.010999186277389526, std inference time: 0.004124400366572474
+Task 3 accuracy: 0.7586206896551724, missed deadlines: 0.9554730983302412
+Test MPPO mean inference time: 0.010999186277389526, std inference time: 0.004124400366572474
+Task 4 accuracy: 0.6581691772885284, missed deadlines: 0.5708446866485014
+Test MPPO mean inference time: 0.010999186277389526, std inference time: 0.004124400366572474
+Task 5 accuracy: 0.6964285714285714, missed deadlines: 0.8248512888301388
+Test MPPO mean inference time: 0.010999186277389526, std inference time: 0.004124400366572474
+Task 6 accuracy: 0.787746170678337, missed deadlines: 0.39520958083832336
+Test MPPO mean inference time: 0.010999186277389526, std inference time: 0.004124400366572474
+Test DM accuracy: 0.7385660075893749, missed deadlines: 0.42328741271938103
+Task 0 accuracy: 0.7786917352134743, missed deadlines: 0.2285610465116279
+Test DM mean inference time: 6.9411301612854e-05, std inference time: 0.0002587906658689382
+Task 1 accuracy: 0.77512297962052, missed deadlines: 0.581646423751687
+Test DM mean inference time: 6.9411301612854e-05, std inference time: 0.0002587906658689382
+Task 2 accuracy: 0.5956284153005464, missed deadlines: 0.5935386927122465
+Test DM mean inference time: 6.9411301612854e-05, std inference time: 0.0002587906658689382
+Task 3 accuracy: 0.7092024539877301, missed deadlines: 0.5242030696576151
+Test DM mean inference time: 6.9411301612854e-05, std inference time: 0.0002587906658689382
+Task 4 accuracy: 0.7795844625112918, missed deadlines: 0.6064291920069504
+Test DM mean inference time: 6.9411301612854e-05, std inference time: 0.0002587906658689382
+Task 5 accuracy: 0.6888111888111889, missed deadlines: 0.5183639398998331
+Test DM mean inference time: 6.9411301612854e-05, std inference time: 0.0002587906658689382
+Task 6 accuracy: 0.7764636309875813, missed deadlines: 0.2406096897114861
+Test DM mean inference time: 6.9411301612854e-05, std inference time: 0.0002587906658689382
+Test STF accuracy: 0.7485787836533305, missed deadlines: 0.054660708718694793
+Task 0 accuracy: 0.7992831541218638, missed deadlines: 0.0011947431302270011
+Test STF mean inference time: 0.0004072586536407471, std inference time: 0.0005047599214880622
+Task 1 accuracy: 0.7746268656716417, missed deadlines: 0.02164179104477612
+Test STF mean inference time: 0.0004072586536407471, std inference time: 0.0005047599214880622
+Task 2 accuracy: 0.5859504132231405, missed deadlines: 0.0008264462809917355
+Test STF mean inference time: 0.0004072586536407471, std inference time: 0.0005047599214880622
+Task 3 accuracy: 0.7114624505928854, missed deadlines: 0.03636363636363636
+Test STF mean inference time: 0.0004072586536407471, std inference time: 0.0005047599214880622
+Task 4 accuracy: 0.794995187680462, missed deadlines: 0.0430622009569378
+Test STF mean inference time: 0.0004072586536407471, std inference time: 0.0005047599214880622
+Task 5 accuracy: 0.7065491183879093, missed deadlines: 0.3853296193129062
+Test STF mean inference time: 0.0004072586536407471, std inference time: 0.0005047599214880622
+Task 6 accuracy: 0.7772455089820359, missed deadlines: 0.0029940119760479044
+Test STF mean inference time: 0.0004072586536407471, std inference time: 0.0005047599214880622
+Test FIFO accuracy: 0.7292727643104502, missed deadlines: 0.6330307020583547
+Task 0 accuracy: 0.7942857142857143, missed deadlines: 0.904711205749268
+Test FIFO mean inference time: 9.839129447937012e-05, std inference time: 0.00030281654894415415
+Task 1 accuracy: 0.7602040816326531, missed deadlines: 0.7502492522432702
+Test FIFO mean inference time: 9.839129447937012e-05, std inference time: 0.00030281654894415415
+Task 2 accuracy: 0.5912023460410557, missed deadlines: 0.6407713498622589
+Test FIFO mean inference time: 9.839129447937012e-05, std inference time: 0.00030281654894415415
+Task 3 accuracy: 0.7177489177489178, missed deadlines: 0.022510822510822513
+Test FIFO mean inference time: 9.839129447937012e-05, std inference time: 0.00030281654894415415
+Task 4 accuracy: 0.7761290322580645, missed deadlines: 0.39732142857142855
+Test FIFO mean inference time: 9.839129447937012e-05, std inference time: 0.00030281654894415415
+Task 5 accuracy: 0.725, missed deadlines: 0.3284041897720271
+Test FIFO mean inference time: 9.839129447937012e-05, std inference time: 0.00030281654894415415
+Task 6 accuracy: 0.7904191616766467, missed deadlines: 0.7524950099800399
+Test FIFO mean inference time: 9.839129447937012e-05, std inference time: 0.00030281654894415415
+Test DQN accuracy: 0.653954802259887, missed deadlines: 0.7139287945034354
+Task 0 accuracy: 0.6666666666666666, missed deadlines: 0.999194847020934
+Test DQN mean inference time: 0.0014373839855194091, std inference time: 0.0006459489526899072
+Task 1 accuracy: 0.5892053973013494, missed deadlines: 0.0029940119760479044
+Test DQN mean inference time: 0.0014373839855194091, std inference time: 0.0006459489526899072
+Task 2 accuracy: 0.0, missed deadlines: 1.0
+Test DQN mean inference time: 0.0014373839855194091, std inference time: 0.0006459489526899072
+Task 3 accuracy: nan, missed deadlines: 1.0
+Test DQN mean inference time: 0.0014373839855194091, std inference time: 0.0006459489526899072
+Task 4 accuracy: 0.6855670103092784, missed deadlines: 0.6996197718631179
+Test DQN mean inference time: 0.0014373839855194091, std inference time: 0.0006459489526899072
+Task 5 accuracy: 0.7232472324723247, missed deadlines: 0.0
+Test DQN mean inference time: 0.0014373839855194091, std inference time: 0.0006459489526899072
+Task 6 accuracy: 0.6666666666666666, missed deadlines: 0.9916167664670659
+Test DQN mean inference time: 0.0014373839855194091, std inference time: 0.0006459489526899072
+Test TRPO accuracy: 0.721379011274935, missed deadlines: 0.22139518781374415
+Task 0 accuracy: 0.8042468480424685, missed deadlines: 0.020516214427531435
+Test TRPO mean inference time: 0.0022193567037582396, std inference time: 0.0014744415441829176
+Task 1 accuracy: 0.7331670822942643, missed deadlines: 0.014943960149439602
+Test TRPO mean inference time: 0.0022193567037582396, std inference time: 0.0014744415441829176
+Task 2 accuracy: 0.5341701534170153, missed deadlines: 0.08953168044077135
+Test TRPO mean inference time: 0.0022193567037582396, std inference time: 0.0014744415441829176
+Task 3 accuracy: nan, missed deadlines: 1.0
+Test TRPO mean inference time: 0.0022193567037582396, std inference time: 0.0014744415441829176
+Task 4 accuracy: 0.5521367521367522, missed deadlines: 0.09554140127388536
+Test TRPO mean inference time: 0.0022193567037582396, std inference time: 0.0014744415441829176
+Task 5 accuracy: nan, missed deadlines: 1.0
+Test TRPO mean inference time: 0.0022193567037582396, std inference time: 0.0014744415441829176
+Task 6 accuracy: 0.8201798201798202, missed deadlines: 0.003992015968063872
+Test TRPO mean inference time: 0.0022193567037582396, std inference time: 0.0014744415441829176
+Test A2C accuracy: 0.7784431137724551, missed deadlines: 0.825951016154247
+Task 0 accuracy: nan, missed deadlines: 1.0
+Test A2C mean inference time: 0.0018894140958786011, std inference time: 0.0006468576832862603
+Task 1 accuracy: nan, missed deadlines: 1.0
+Test A2C mean inference time: 0.0018894140958786011, std inference time: 0.0006468576832862603
+Task 2 accuracy: nan, missed deadlines: 1.0
+Test A2C mean inference time: 0.0018894140958786011, std inference time: 0.0006468576832862603
+Task 3 accuracy: nan, missed deadlines: 1.0
+Test A2C mean inference time: 0.0018894140958786011, std inference time: 0.0006468576832862603
+Task 4 accuracy: nan, missed deadlines: 1.0
+Test A2C mean inference time: 0.0018894140958786011, std inference time: 0.0006468576832862603
+Task 5 accuracy: nan, missed deadlines: 1.0
+Test A2C mean inference time: 0.0018894140958786011, std inference time: 0.0006468576832862603
+Task 6 accuracy: 0.7784431137724551, missed deadlines: 0.0
+Test A2C mean inference time: 0.0018894140958786011, std inference time: 0.0006468576832862603
+Test PPO accuracy: 0.7308189655172413, missed deadlines: 0.20294882914137033
+Task 0 accuracy: 0.7993333333333333, missed deadlines: 0.004660452729693742
+Test PPO mean inference time: 0.002374059224128723, std inference time: 0.0014088587805306094
+Task 1 accuracy: 0.6587795765877957, missed deadlines: 0.007471980074719801
+Test PPO mean inference time: 0.002374059224128723, std inference time: 0.0014088587805306094
+Task 2 accuracy: 0.6409537166900421, missed deadlines: 0.05509641873278237
+Test PPO mean inference time: 0.002374059224128723, std inference time: 0.0014088587805306094
+Task 3 accuracy: nan, missed deadlines: 1.0
+Test PPO mean inference time: 0.002374059224128723, std inference time: 0.0014088587805306094
+Task 4 accuracy: 0.6688102893890675, missed deadlines: 0.0112
+Test PPO mean inference time: 0.002374059224128723, std inference time: 0.0014088587805306094
+Task 5 accuracy: nan, missed deadlines: 1.0
+Test PPO mean inference time: 0.002374059224128723, std inference time: 0.0014088587805306094
+Task 6 accuracy: 0.7884231536926147, missed deadlines: 0.0029940119760479044
+Test PPO mean inference time: 0.002374059224128723, std inference time: 0.0014088587805306094
+Test QRDQN accuracy: 0.6937525520620661, missed deadlines: 0.5724984397753277
+Task 0 accuracy: 0.799163179916318, missed deadlines: 0.684
+Test QRDQN mean inference time: 0.0019706181049346924, std inference time: 0.0006457980308776367
+Task 1 accuracy: 0.5829528158295282, missed deadlines: 0.09566517189835576
+Test QRDQN mean inference time: 0.0019706181049346924, std inference time: 0.0006457980308776367
+Task 2 accuracy: 0.6593406593406593, missed deadlines: 0.228099173553719
+Test QRDQN mean inference time: 0.0019706181049346924, std inference time: 0.0006457980308776367
+Task 3 accuracy: 0.7078651685393258, missed deadlines: 0.38181818181818183
+Test QRDQN mean inference time: 0.0019706181049346924, std inference time: 0.0006457980308776367
+Task 4 accuracy: 0.714975845410628, missed deadlines: 0.7735124760076776
+Test QRDQN mean inference time: 0.0019706181049346924, std inference time: 0.0006457980308776367
+Task 5 accuracy: 0.7625, missed deadlines: 0.8800738007380073
+Test QRDQN mean inference time: 0.0019706181049346924, std inference time: 0.0006457980308776367
+Task 6 accuracy: 0.822429906542056, missed deadlines: 0.8
+Test QRDQN mean inference time: 0.0019706181049346924, std inference time: 0.0006457980308776367
