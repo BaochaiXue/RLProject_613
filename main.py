@@ -25,7 +25,7 @@ def call_script(script_name: str, param: int | None) -> None:
 
 
 if __name__ == "__main__":
-    time_step_of_training: int = 1000
+    time_step_of_training: int = 1000000
     actions: int = [1, 2]
     for action in actions:
         if action == 0:  # we are doing RLs Ablation study

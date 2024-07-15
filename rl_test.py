@@ -361,7 +361,7 @@ if __name__ == "__main__":
         "QRDQN",
     ]
 
-    test_steps = 20000  # You can change the number of test steps here
+    test_steps = 30000  # You can change the number of test steps here
 
     for test_name in test_list:
         print(f"Testing {test_name}")

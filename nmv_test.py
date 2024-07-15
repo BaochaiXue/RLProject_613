@@ -165,7 +165,7 @@ if __name__ == "__main__":
     test_list = ["TRPO", "PPO"]
     test_kinds = ["gp", "nmv"]
     workloads = ["lw", "mw", "hw"]
-    test_steps = 20000
+    test_steps = 30000
 
     for test_name in test_list:
         for test_kind in test_kinds:
