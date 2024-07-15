@@ -19,3 +19,4 @@ my_log
 __pycache__
 RL_models
 test_result
+gp_ngp_models

@@ -21,6 +21,7 @@ from environment import DLSchedulingEnv
 from stable_baselines3 import PPO
 import warnings
 from env_ngp import NGPSchedulingEnv
+from env_nmv import NMVDLSchedulingEnv
 
 warnings.filterwarnings("ignore")
 pynvml.nvmlInit()
@@ -48,7 +49,7 @@ def test_model(model_name: str, test_kind: str, workload: str, test_steps: int =
             test_name=f"{model_name}_{test_kind}_{workload}",
         )
         if test_kind == "gp"
-        else NGPSchedulingEnv(
+        else NMVDLSchedulingEnv(
             config_file=f"config_{workload}.json",
             model_info_file="model_information.csv",
             if_training=False,
@@ -162,7 +163,7 @@ def log_results(
 
 if __name__ == "__main__":
     test_list = ["TRPO", "PPO"]
-    test_kinds = ["gp", "ngp"]
+    test_kinds = ["gp", "nmv"]
     workloads = ["lw", "mw", "hw"]
     test_steps = 20000
 
@@ -174,6 +175,6 @@ if __name__ == "__main__":
 
     today_date = time.strftime("%Y-%m-%d")
     time_now = time.strftime("%H-%M-%S")
-    result_file = f"test_result/test_results_ngp_{today_date}_{time_now}.csv"
+    result_file = f"test_result/test_results_nmv_{today_date}_{time_now}.csv"
 
     log_results(test_list, test_kinds, workloads, result_file)

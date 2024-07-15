@@ -32,7 +32,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 import sys
 
 # warnings.filterwarnings("ignore")
-#hyperparameters kind 2
+# hyperparameters kind 2
 pynvml.nvmlInit()
 avg_predict_time: float = 1.22059
 std_predict_time: float = 0.150174
