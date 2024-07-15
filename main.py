@@ -26,16 +26,21 @@ def call_script(script_name: str, param: int | None) -> None:
 
 if __name__ == "__main__":
     time_step_of_training: int = 1000
-    action: int = 1
-    if action == 0:  # we are doing RLs Ablation study
-        scripts: List[str] = ["environment.py", "other_rl_trains.py", "rl_test.py"]
-        call_script(scripts[0], time_step_of_training)
-        call_script(scripts[1], time_step_of_training)
-        call_script(scripts[2], None)
-    elif action == 1:  # we are doing GPU streams Ablation study
-        scripts: List[str] = ["env_ngp.py", "env_gp.py", "ngp_test.py"]
-        call_script(scripts[0], time_step_of_training)
-        call_script(scripts[1], time_step_of_training)
-        call_script(scripts[2], None)
-    else:
-        print("Invalid action.")
+    actions: int = [1, 2]
+    for action in actions:
+        if action == 0:  # we are doing RLs Ablation study
+            scripts: List[str] = ["environment.py", "other_rl_trains.py", "rl_test.py"]
+            call_script(scripts[0], time_step_of_training)
+            call_script(scripts[1], time_step_of_training)
+            call_script(scripts[2], None)
+        elif action == 1:  # we are doing GPU streams Ablation study
+            scripts: List[str] = ["env_ngp.py", "env_gp.py", "ngp_test.py"]
+            call_script(scripts[0], time_step_of_training)
+            call_script(scripts[1], time_step_of_training)
+            call_script(scripts[2], None)
+        elif action == 2:  # we are doing NMV Ablation study
+            scripts: List[str] = ["env_nmv.py", "nmv_test.py"]
+            call_script(scripts[0], time_step_of_training)
+            call_script(scripts[1], None)
+        else:
+            print("Invalid action.")
