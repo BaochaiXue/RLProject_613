@@ -63,8 +63,8 @@ def test_model(model_name: str, test_kind: str, workload: str, test_steps: int =
     ] = []
 
     obs = env.reset()
-    have_reset = False
-    for i in range(test_steps):
+    count_episodes: int = 0
+    while count_episodes <= test_steps // 5000:
         start_time_of_inference = time.time()
         action, _states = model.predict(obs, deterministic=True)
         end_time_of_inference = time.time()
@@ -74,9 +74,9 @@ def test_model(model_name: str, test_kind: str, workload: str, test_steps: int =
             f"{model_name}_{test_kind}_{workload}"
         ].append(end_time_of_inference - start_time_of_inference)
 
-        if dones or (i == test_steps - 1 and not have_reset):
+        if dones:
             obs = env.reset()
-            have_reset = True
+            count_episodes += 1
 
     env.close()
 

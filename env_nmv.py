@@ -118,7 +118,7 @@ def load_single_test_image(vit_16_using: bool, dataset_name: str = "CIFAR10") ->
 
 def load_model(model_name: str, model_number: int, dataset_name: str) -> nn.Module:
     model_file: str = (
-        f"selected_models/{model_name}/{model_name}_{dataset_name}_{model_number}.pth"
+        f"selected_models_nmv/{model_name}/{model_name}_{dataset_name}_{model_number}.pth"
     )
     if not os.path.exists(model_file):
         raise FileNotFoundError(f"Model file {model_file} not found.")
